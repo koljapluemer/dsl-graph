@@ -225,6 +225,15 @@ export interface ClearImageRequest {
   filename: string
 }
 
+export interface OrphanedMediaResponse {
+  /** Recognized attachment files that are not the active attachment of any indexed note. */
+  count: number
+}
+
+export interface DeleteOrphanedMediaResponse {
+  deletedCount: number
+}
+
 export interface MediaFileRequest {
   /** Filename inside the graph folder's images/ subdirectory. */
   image: string
@@ -302,6 +311,8 @@ export interface NotesApi {
   updateNote: (request: UpdateNoteRequest) => Promise<void>
   attachImage: (request: AttachImageRequest) => Promise<AttachImageResponse>
   clearImage: (request: ClearImageRequest) => Promise<void>
+  findOrphanedMedia: () => Promise<OrphanedMediaResponse>
+  deleteOrphanedMedia: () => Promise<DeleteOrphanedMediaResponse>
   getMediaDataUrl: (request: MediaFileRequest) => Promise<string>
   copyMedia: (request: CopyMediaRequest) => Promise<void>
   copyMediaPath: (request: MediaFileRequest) => Promise<void>

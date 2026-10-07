@@ -230,6 +230,14 @@ app.whenReady().then(() => {
     return noteStore.clearImage(request)
   })
 
+  ipcMain.handle('notes:find-orphaned-media', async () => {
+    return noteStore.findOrphanedMedia()
+  })
+
+  ipcMain.handle('notes:delete-orphaned-media', async () => {
+    return noteStore.deleteOrphanedMedia()
+  })
+
   ipcMain.handle('notes:get-media-data-url', async (_event, request: MediaFileRequest) => {
     const path = noteStore.mediaFilePath(request.image)
     const extension = request.image.split('.').pop()?.toLowerCase() ?? ''

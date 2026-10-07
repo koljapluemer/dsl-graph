@@ -1,5 +1,5 @@
 import { useEffect, useReducer, useState } from 'react'
-import { AlertTriangle, FolderOpen, LoaderCircle, Moon, Settings2, Sun } from 'lucide-react'
+import { AlertTriangle, FolderOpen, LoaderCircle, Moon, Settings2, Sun, Trash2 } from 'lucide-react'
 import GraphCanvas from './components/GraphCanvas'
 import Sidebar from './components/sidebar/Sidebar'
 import { INITIAL_SEARCH_STATE, searchReducer } from './components/sidebar/search-state'
@@ -37,6 +37,8 @@ function App(): React.JSX.Element {
   const [indexProgress, setIndexProgress] = useState<IndexProgress | null>(null)
   const [settingsBusy, setSettingsBusy] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [mediaCleanupBusy, setMediaCleanupBusy] = useState(false)
+  const [orphanedMediaCount, setOrphanedMediaCount] = useState<number | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [orphanBusy, setOrphanBusy] = useState(false)
   const [randomNoteBusy, setRandomNoteBusy] = useState(false)
@@ -116,11 +118,42 @@ function App(): React.JSX.Element {
       // unchanged bootstrap state when the user cancels the dialog.
       if (state.graphPath !== previousGraphPath) {
         clearPins()
+        setOrphanedMediaCount(null)
       }
     } catch (error) {
       setErrorMessage((error as Error).message)
     } finally {
       setSettingsBusy(false)
+    }
+  }
+
+  const handleFindOrphanedMedia = async (): Promise<void> => {
+    setMediaCleanupBusy(true)
+    try {
+      const result = await window.api.notes.findOrphanedMedia()
+      setOrphanedMediaCount(result.count)
+      setErrorMessage(null)
+    } catch (error) {
+      setErrorMessage((error as Error).message)
+    } finally {
+      setMediaCleanupBusy(false)
+    }
+  }
+
+  const handleDeleteOrphanedMedia = async (): Promise<void> => {
+    setMediaCleanupBusy(true)
+    try {
+      const result = await window.api.notes.deleteOrphanedMedia()
+      setOrphanedMediaCount(0)
+      setErrorMessage(
+        result.deletedCount === 1
+          ? 'Deleted 1 orphaned media file.'
+          : `Deleted ${result.deletedCount} orphaned media files.`
+      )
+    } catch (error) {
+      setErrorMessage((error as Error).message)
+    } finally {
+      setMediaCleanupBusy(false)
     }
   }
 
@@ -303,6 +336,46 @@ function App(): React.JSX.Element {
 
           {bootstrap?.message ? (
             <div className="alert alert-warning alert-soft mt-5">{bootstrap.message}</div>
+          ) : null}
+
+          {bootstrap?.status === 'ready' ? (
+            <div className="mt-5 flex items-center justify-between gap-4 border-t border-base-300 pt-5">
+              <div>
+                <span className="text-sm font-medium">Orphaned media</span>
+                {orphanedMediaCount !== null ? (
+                  <p className="mt-1 text-sm text-base-content/70">
+                    {orphanedMediaCount === 1
+                      ? '1 file is not attached to a note.'
+                      : `${orphanedMediaCount} files are not attached to notes.`}
+                  </p>
+                ) : null}
+              </div>
+              {orphanedMediaCount && orphanedMediaCount > 0 ? (
+                <button
+                  type="button"
+                  className="btn btn-error btn-outline btn-sm rounded-full"
+                  disabled={mediaCleanupBusy}
+                  onClick={() => void handleDeleteOrphanedMedia()}
+                >
+                  {mediaCleanupBusy ? (
+                    <LoaderCircle className="size-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="size-4" />
+                  )}
+                  Delete {orphanedMediaCount}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-outline btn-sm rounded-full"
+                  disabled={mediaCleanupBusy}
+                  onClick={() => void handleFindOrphanedMedia()}
+                >
+                  {mediaCleanupBusy ? <LoaderCircle className="size-4 animate-spin" /> : null}
+                  Scan
+                </button>
+              )}
+            </div>
           ) : null}
 
           <div className="mt-5 flex items-center justify-between border-t border-base-300 pt-5">

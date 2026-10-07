@@ -676,6 +676,33 @@ export class NoteStore extends EventEmitter {
     })
   }
 
+  async findOrphanedMedia(): Promise<{ count: number }> {
+    await this.ensureIndexed()
+    return { count: (await this.orphanedMediaFiles()).length }
+  }
+
+  async deleteOrphanedMedia(): Promise<{ deletedCount: number }> {
+    await this.ensureIndexed()
+
+    const orphanedFiles = await this.orphanedMediaFiles()
+    await Promise.all(
+      orphanedFiles.map(async (filename) => {
+        const path = this.imageFilePath(filename)
+        this.markSelfWrite(path)
+        try {
+          await unlink(path)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+            throw error
+          }
+        }
+      })
+    )
+    await this.scanImages()
+
+    return { deletedCount: orphanedFiles.length }
+  }
+
   async updateNote(request: UpdateNoteRequest): Promise<void> {
     await this.ensureIndexed()
 
@@ -2243,6 +2270,19 @@ export class NoteStore extends EventEmitter {
       }
       throw error
     }
+  }
+
+  /** Recognized media files not selected as the live attachment of any indexed note. */
+  private async orphanedMediaFiles(): Promise<string[]> {
+    const liveMedia = new Set(
+      [...this.notes.values()]
+        .map((note) => note.image)
+        .filter((filename): filename is string => filename !== null)
+    )
+
+    return (await this.listImageDir()).filter(
+      (entry) => this.parseImageName(entry) !== null && !liveMedia.has(entry)
+    )
   }
 
   /** `foo-1724900000000.webp` -> `{ stem: 'foo', ts: 1724900000000 }`, or null when it isn't a note's attached media. */
