@@ -1,4 +1,6 @@
-# graphirst
+# graph
+
+Formerly "graphirst".
 
 Plain-text notetaking with semantic relationships as a first-class citizen.
 

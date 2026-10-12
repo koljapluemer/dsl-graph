@@ -1,5 +1,5 @@
-appId: com.electron.app
-productName: graphirst
+appId: com.koljasam.dsl_graph
+productName: graph
 directories:
   buildResources: build
 files:
@@ -12,7 +12,7 @@ files:
 asarUnpack:
   - resources/**
 win:
-  executableName: graphirst
+  executableName: dsl-graph
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}
@@ -29,6 +29,7 @@ mac:
 dmg:
   artifactName: ${name}-${version}.${ext}
 linux:
+  executableName: dsl-graph
   target:
     - AppImage
     - snap

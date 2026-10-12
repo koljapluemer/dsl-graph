@@ -124,7 +124,7 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
-  electronApp.setAppUserModelId('com.electron')
+  electronApp.setAppUserModelId('com.koljasam.dsl_graph')
   noteStore = new NoteStore(app.getPath('userData'))
 
   // Single fan-out point for "the note index changed" - every renderer-side view
