@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import { isAbsolute, relative, sep } from 'node:path'
 import { watch, type ChokidarOptions, type FSWatcher } from 'chokidar'
-import { IMAGES_DIR_NAME, SUPPORTED_MEDIA_EXTENSIONS } from './graph-fs'
+import { isNoteFilename } from './graph-fs'
 
 /** Trailing debounce: how long the buffer waits for the next event before flushing. */
 const DEFAULT_DEBOUNCE_MS = 150
@@ -12,13 +12,13 @@ const DEFAULT_STABILITY_THRESHOLD_MS = 200
 const DEFAULT_POLL_INTERVAL_MS = 50
 
 /**
- * One coalesced description of what changed in the graph folder since the last
- * flush. Note names are bare `*.json` basenames (as NoteStore keys them);
- * `images.paths` are absolute paths.
+ * One coalesced description of which note files changed in the graph folder
+ * since the last flush. Names are bare `*.txt` basenames, as NoteStore keys them.
  */
 export interface GraphChangeBatch {
-  notes: { added: string[]; changed: string[]; removed: string[] }
-  images: { touched: boolean; paths: string[] }
+  added: string[]
+  changed: string[]
+  removed: string[]
 }
 
 export interface GraphWatcherOptions {
@@ -30,8 +30,6 @@ export interface GraphWatcherOptions {
 
 type NoteEventKind = 'add' | 'change' | 'unlink'
 
-type Classification = { kind: 'note'; name: string } | { kind: 'image'; name: string } | null
-
 interface GraphWatcherEvents {
   batch: [batch: GraphChangeBatch]
   error: [error: Error]
@@ -39,9 +37,10 @@ interface GraphWatcherEvents {
 }
 
 /**
- * Watches one graph folder - a flat set of `*.json` note files plus an `images/`
- * subdirectory - and emits coalesced `batch` events describing what changed on
- * disk. It translates filesystem events into batches and nothing more: it has no
+ * Watches one graph folder - a flat set of `*.txt` note files - and emits
+ * coalesced `batch` events describing what changed on disk. Media files aren't
+ * watched: a note names its media in its own text, so a media change is a note
+ * change. It translates filesystem events into batches and nothing more: it has no
  * knowledge of the note index, the search corpus, or how a batch is applied.
  */
 export class GraphWatcher extends EventEmitter<GraphWatcherEvents> {
@@ -57,8 +56,6 @@ export class GraphWatcher extends EventEmitter<GraphWatcherEvents> {
   private readonly added = new Set<string>()
   private readonly changed = new Set<string>()
   private readonly removed = new Set<string>()
-  private imagesTouched = false
-  private readonly imagePaths = new Set<string>()
 
   private debounceTimer: NodeJS.Timeout | null = null
   private capTimer: NodeJS.Timeout | null = null
@@ -94,8 +91,8 @@ export class GraphWatcher extends EventEmitter<GraphWatcherEvents> {
     const options: ChokidarOptions = {
       persistent: true,
       ignoreInitial: true,
-      // depth 1 covers the root `*.json` files and the one level of `images/*`.
-      depth: 1,
+      // Notes live directly inside the graph folder.
+      depth: 0,
       awaitWriteFinish: {
         stabilityThreshold: this.stabilityThresholdMs,
         pollInterval: this.pollIntervalMs
@@ -137,33 +134,19 @@ export class GraphWatcher extends EventEmitter<GraphWatcherEvents> {
 
   /**
    * chokidar consults this for every path it encounters, directories included, so
-   * the graph root and the `images/` directory must be allowed through for their
-   * contents to be walked at all.
+   * the graph root must be allowed through for its contents to be walked at all.
    */
   private isIgnored(graphPath: string, candidate: string): boolean {
-    if (candidate === graphPath) {
-      return false
-    }
-    if (relative(graphPath, candidate) === IMAGES_DIR_NAME) {
-      return false
-    }
-    return classify(graphPath, candidate) === null
+    return candidate !== graphPath && noteName(graphPath, candidate) === null
   }
 
   private onNoteEvent(kind: NoteEventKind, graphPath: string, absPath: string): void {
-    const entry = classify(graphPath, absPath)
-    if (!entry) {
+    const name = noteName(graphPath, absPath)
+    if (!name) {
       return
     }
 
-    if (entry.kind === 'image') {
-      this.imagesTouched = true
-      this.imagePaths.add(absPath)
-      this.scheduleFlush()
-      return
-    }
-
-    this.reconcileNoteEvent(kind, entry.name)
+    this.reconcileNoteEvent(kind, name)
     this.scheduleFlush()
   }
 
@@ -210,21 +193,16 @@ export class GraphWatcher extends EventEmitter<GraphWatcherEvents> {
     }
 
     const batch: GraphChangeBatch = {
-      notes: {
-        added: [...this.added].sort(),
-        changed: [...this.changed].sort(),
-        removed: [...this.removed].sort()
-      },
-      images: { touched: this.imagesTouched, paths: [...this.imagePaths].sort() }
+      added: [...this.added].sort(),
+      changed: [...this.changed].sort(),
+      removed: [...this.removed].sort()
     }
     this.discardBuffer()
     this.emit('batch', batch)
   }
 
   private hasBufferedChanges(): boolean {
-    return (
-      this.added.size > 0 || this.changed.size > 0 || this.removed.size > 0 || this.imagesTouched
-    )
+    return this.added.size > 0 || this.changed.size > 0 || this.removed.size > 0
   }
 
   private clearTimers(): void {
@@ -242,44 +220,14 @@ export class GraphWatcher extends EventEmitter<GraphWatcherEvents> {
     this.added.clear()
     this.changed.clear()
     this.removed.clear()
-    this.imagePaths.clear()
-    this.imagesTouched = false
   }
 }
 
-/**
- * Maps an absolute path to the graph entity it represents, or null when the path
- * is not part of the graph (nested deeper, a non-JSON root file, a dotfile, a
- * temp/swap file, an unsupported image type, ...).
- */
-function classify(graphPath: string, absPath: string): Classification {
-  const rel = relative(graphPath, absPath)
-  if (!rel || rel.startsWith('..') || isAbsolute(rel)) {
+/** The note basename an absolute path stands for, or null when it isn't a note file directly inside the graph folder. */
+function noteName(graphPath: string, absPath: string): string | null {
+  const name = relative(graphPath, absPath)
+  if (!name || name.startsWith('..') || isAbsolute(name) || name.includes(sep)) {
     return null
   }
-
-  const segments = rel.split(sep)
-
-  if (segments.length === 1) {
-    const name = segments[0]
-    if (name.startsWith('.') || !name.toLowerCase().endsWith('.json')) {
-      return null
-    }
-    return { kind: 'note', name }
-  }
-
-  if (segments.length === 2 && segments[0] === IMAGES_DIR_NAME) {
-    const name = segments[1]
-    if (name.startsWith('.')) {
-      return null
-    }
-    const dot = name.lastIndexOf('.')
-    const extension = dot >= 0 ? name.slice(dot + 1).toLowerCase() : ''
-    if (!SUPPORTED_MEDIA_EXTENSIONS.has(extension)) {
-      return null
-    }
-    return { kind: 'image', name }
-  }
-
-  return null
+  return isNoteFilename(name) ? name : null
 }

@@ -9,7 +9,7 @@ import {
   net,
   protocol
 } from 'electron'
-import { basename, join } from 'path'
+import { join } from 'path'
 import { readFile } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
@@ -21,7 +21,6 @@ import type {
   ConnectNotesRequest,
   CopyMediaRequest,
   CreateNoteRequest,
-  DeleteNoteEntryRequest,
   DeleteNoteRequest,
   DeleteRelationRequest,
   IndexProgress,
@@ -149,12 +148,12 @@ app.whenReady().then(() => {
 
   setInterval(requestReconcile, RECONCILE_INTERVAL_MS).unref()
 
-  // Serves note-attached media (an image or video) straight out of <graphPath>/images - reads the graph
-  // path fresh on every request (rather than capturing it once) since it can change
-  // at runtime via pickDirectory/setGraphPath. The filename rides in the URL path,
-  // not the authority: image files inherit their note's filename stem, which is
-  // routinely not a valid URL host (leading `-`, spaces, uppercase, …). basename
-  // also collapses any `../` traversal the path might carry.
+  // Serves note-attached media (an image or video): the URL path is a note's media
+  // path, relative to the graph folder. noteStore.mediaFilePath resolves it against
+  // the current graph folder (which can change at runtime via pickDirectory) and
+  // refuses any path no indexed note references, so this never serves arbitrary
+  // files. The path rides in the URL path, not the authority: it is routinely not a
+  // valid URL host (leading `-`, spaces, uppercase, …).
   //
   // Fetches through net.fetch on a file:// URL (rather than fs.readFile + a plain
   // 200 Response) so the Range header a <video> element sends is honored with a
@@ -162,20 +161,21 @@ app.whenReady().then(() => {
   // seeking, and some Chromium versions refuse to play the source at all without
   // it (see https://github.com/electron/electron/issues/38749).
   protocol.handle(MEDIA_PROTOCOL, async (request) => {
-    const filename = basename(decodeURIComponent(new URL(request.url).pathname))
-    const extension = filename.split('.').pop()?.toLowerCase() ?? ''
+    const mediaPath = decodeURIComponent(new URL(request.url).pathname).replace(/^\//, '')
+    const extension = mediaPath.split('.').pop()?.toLowerCase() ?? ''
     const mimeType = MEDIA_MIME_TYPES[extension]
 
-    if (!filename || !mimeType) {
+    if (!mimeType) {
       return new Response(null, { status: 404 })
     }
 
-    const graphPath = noteStore.getCurrentPath()
-    if (!graphPath) {
+    let fileUrl: string
+    try {
+      fileUrl = pathToFileURL(noteStore.mediaFilePath(mediaPath)).toString()
+    } catch {
       return new Response(null, { status: 404 })
     }
 
-    const fileUrl = pathToFileURL(join(graphPath, 'images', filename)).toString()
     try {
       const response = await net.fetch(fileUrl, { headers: request.headers })
       if (!response.ok && response.status !== 206) {
@@ -289,10 +289,6 @@ app.whenReady().then(() => {
 
   ipcMain.handle('notes:recent-notes', async (_event, request: RecentNotesRequest) => {
     return noteStore.recentNotes(request)
-  })
-
-  ipcMain.handle('notes:delete-note-entry', async (_event, request: DeleteNoteEntryRequest) => {
-    return noteStore.deleteNoteEntry(request)
   })
 
   ipcMain.handle('notes:undo-delete', async () => {

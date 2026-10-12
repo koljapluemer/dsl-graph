@@ -1,27 +1,3 @@
-export type NoteRelationTuple = [label: string, target: string]
-
-export interface RawNoteFile {
-  body?: string
-  rels?: NoteRelationTuple[]
-  /**
-   * Long-form content for this note. Shared verbatim with the sibling `../note`
-   * app, which owns this key. An attached image or video is NOT referenced here -
-   * it is a loose file in the graph folder's `images/` subdirectory, matched to
-   * this note by filename stem (see NoteStore.imagesByStem).
-   */
-  extra?: string
-  /** Freeform comments/to-dos attached to this note, rendered on the node itself. */
-  notes?: string[]
-  /** ISO-8601 timestamp, written once when this app first creates the note. Implies `updated` and `opened` at that same instant. */
-  created?: string
-  /** ISO-8601 timestamp of the last content edit (body, extra content, or a freeform note entry). Any `updated` also refreshes `opened`. */
-  updated?: string
-  /** ISO-8601 timestamp this note was last opened on the graph - pinned onto it, created, or edited. */
-  opened?: string
-  /** ISO-8601 timestamp of the last change to this note's relationships, incoming or outgoing (a target added or removed, or a label changed). */
-  relationshipsChanged?: string
-}
-
 export interface NoteLink {
   label: string
   target: string
@@ -34,17 +10,13 @@ export interface IndexedNote {
   bodyCompact: string
   rels: NoteLink[]
   degree: number
-  /** Filename (inside the graph folder's `images/` subdirectory) of the image or video matched to this note by stem, or null. */
+  /** Path of the attached image or video (the note's `media` line), relative to the graph folder, or null. */
   image: string | null
   extraContent: string
   /** Whitespace-compacted extra content, the extra-content counterpart to bodyCompact (search now scans this too). */
   extraCompact: string
-  notes: string[]
-  /** ISO-8601 lifecycle timestamps (see RawNoteFile). Null until this app has stamped the corresponding event. */
-  created: string | null
-  updated: string | null
-  opened: string | null
-  relationshipsChanged: string | null
+  /** The note file's last modification, which orders the recent-notes list. */
+  mtimeMs: number
 }
 
 export interface PinSpec {
@@ -62,12 +34,6 @@ export interface GraphNodePayload {
   degree: number
   /** Distinct renderable notes related to this one (either direction) that are not on the canvas - what pinning it at depth 1 would bring in. */
   hiddenNeighbors: number
-  notes: string[]
-  /** ISO-8601 lifecycle timestamps (see RawNoteFile). Null until this app has stamped the corresponding event. */
-  created: string | null
-  updated: string | null
-  opened: string | null
-  relationshipsChanged: string | null
 }
 
 export interface GraphEdgePayload {
@@ -108,14 +74,9 @@ export interface SearchResult {
   excerpt: SearchExcerpt | null
 }
 
-/** Which lifecycle timestamp (see RawNoteFile) the recent-notes list is ordered by. */
-export type RecentNotesSort = 'created' | 'updated' | 'opened'
-
 export interface RecentNote {
   filename: string
   preview: string
-  /** ISO-8601 value of the timestamp the list was sorted by. */
-  timestamp: string
 }
 
 /** Narrows search results by whether a note has any relationship, incoming or outgoing. */
@@ -164,15 +125,14 @@ export interface SearchFilenamesResponse {
 }
 
 export interface RecentNotesRequest {
-  sort: RecentNotesSort
   /** Zero-based page of NOTE_LIST_PAGE_SIZE results. */
   page: number
 }
 
 export interface RecentNotesResponse {
-  /** The requested page, newest first. Notes never stamped with the requested timestamp are omitted. */
+  /** The requested page, most recently modified first. */
   results: RecentNote[]
-  /** Every stamped note, across all pages. */
+  /** Every note, across all pages. */
   total: number
 }
 
@@ -204,24 +164,24 @@ export interface DeleteNoteRequest {
 export interface UpdateNoteRequest {
   filename: string
   body: string
-  /** Full desired extra content - empty string removes the `extra` key. Always sent (unlike a PATCH-style partial). */
+  /** Full desired extra content - blank removes the extra block. Always sent (unlike a PATCH-style partial). */
   extraContent: string
 }
 
 export interface AttachImageRequest {
-  /** The note the media is being attached to (its .json filename). */
+  /** The note the media is being attached to (its filename). */
   filename: string
   /** A data: URL, e.g. "data:image/webp;base64,..." or "data:video/mp4;base64,...". */
   dataUrl: string
 }
 
 export interface AttachImageResponse {
-  /** Filename the media was written under inside the graph folder's images/ subdirectory. */
+  /** Path the media was written to, relative to the graph folder (`images/...`). */
   image: string
 }
 
 export interface ClearImageRequest {
-  /** The note whose attached media should be removed (its .json filename). */
+  /** The note whose attached media should be removed (its filename). */
   filename: string
 }
 
@@ -235,7 +195,7 @@ export interface DeleteOrphanedMediaResponse {
 }
 
 export interface MediaFileRequest {
-  /** Filename inside the graph folder's images/ subdirectory. */
+  /** A note's media path, relative to the graph folder. */
   image: string
 }
 
@@ -288,12 +248,6 @@ export interface RandomNoteResponse {
   filename: string | null
 }
 
-export interface DeleteNoteEntryRequest {
-  filename: string
-  /** Index into that note's `notes` array of the entry to remove. */
-  index: number
-}
-
 export interface UndoDeleteResponse {
   /** False when there was nothing pending to undo (already restored, or superseded by a later delete). */
   restored: boolean
@@ -321,7 +275,6 @@ export interface NotesApi {
   deleteRelation: (request: DeleteRelationRequest) => Promise<void>
   randomOrphan: (request: RandomOrphanRequest) => Promise<RandomOrphanResponse>
   randomNote: (request: RandomNoteRequest) => Promise<RandomNoteResponse>
-  deleteNoteEntry: (request: DeleteNoteEntryRequest) => Promise<void>
   /** Restores whatever `deleteNote`/`deleteRelation` most recently removed. */
   undoDelete: () => Promise<UndoDeleteResponse>
   /**

@@ -21,7 +21,6 @@ export type NoteNodeData =
       onPin: (filename: string) => void
       onUnpin: (filename: string) => void
       onChangeDepth: (filename: string, nextDepth: number) => void
-      onDeleteNoteEntry: (filename: string, index: number) => Promise<void>
     }
   | {
       kind: 'draft'
@@ -100,7 +99,6 @@ function NoteNode({ data }: NodeProps<NoteFlowNode>): React.JSX.Element {
           onPin={data.onPin}
           onUnpin={data.onUnpin}
           onChangeDepth={data.onChangeDepth}
-          onDeleteNoteEntry={data.onDeleteNoteEntry}
         />
       ) : data.kind === 'edit' ? (
         <DraftNoteCard

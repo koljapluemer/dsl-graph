@@ -1,20 +1,19 @@
 import { startTransition, useEffect, useRef, useState } from 'react'
-import type { RecentNote, RecentNotesSort } from '../../../shared/notes'
+import type { RecentNote } from '../../../shared/notes'
 
 export interface UseRecentNotesResult {
   results: RecentNote[]
-  /** Every note stamped with the sort's timestamp, across all pages. */
+  /** Every note, across all pages. */
   total: number
   loading: boolean
 }
 
 /**
- * One page of the most recent notes by the chosen lifecycle timestamp. Re-queries on
- * any backend note change (see notes.onChanged), so pinning, creating or editing a
- * note reorders the list without the caller doing anything.
+ * One page of the most recently modified notes. Re-queries on any backend note
+ * change (see notes.onChanged), so creating or editing a note reorders the list
+ * without the caller doing anything.
  */
 export function useRecentNotes(
-  sort: RecentNotesSort,
   page: number,
   onError?: (error: Error) => void
 ): UseRecentNotesResult {
@@ -35,7 +34,7 @@ export function useRecentNotes(
     const loadRecent = async (): Promise<void> => {
       setLoading(true)
       try {
-        const response = await window.api.notes.recentNotes({ sort, page })
+        const response = await window.api.notes.recentNotes({ page })
         if (!ignore) {
           startTransition(() => {
             setResults(response.results)
@@ -58,7 +57,7 @@ export function useRecentNotes(
     return () => {
       ignore = true
     }
-  }, [sort, page, changeNonce])
+  }, [page, changeNonce])
 
   return { results, total, loading }
 }

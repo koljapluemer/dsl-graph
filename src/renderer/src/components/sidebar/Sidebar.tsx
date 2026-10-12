@@ -45,8 +45,6 @@ export default function Sidebar({
         <SearchTab {...search} pins={pins} />
       ) : (
         <RecentTab
-          sort={state.recentSort}
-          onSortChange={(sort) => dispatch({ type: 'SELECT_RECENT_SORT', sort })}
           page={state.recentPage}
           onPageChange={(page) => dispatch({ type: 'SET_RECENT_PAGE', page })}
           pins={pins}

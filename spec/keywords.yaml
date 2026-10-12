@@ -1,0 +1,58 @@
+# Every keyword of the item language. Syntax and value types: language.md.
+#
+# Per keyword:
+#   role:     primary  — the item's type; opens the keyword section (see
+#                        "boundary"). An item may have none: then it is a note.
+#             property — not a type, but opens the keyword section too
+#             modifier — may only appear inside the keyword section
+#             state    — machine-maintained; only inside a `( … )` state line
+#   args:     positional arguments, all required: {name, type}
+#   options:  named optional sub-keywords, each followed by one value:
+#             {<option>: {type, meaning}}
+#   excludes: keywords that may not appear in the same item (declare on both)
+#   meaning:  what the keyword does — the part frontends must agree on
+#
+# A type is one name from language.md, or a list of them.
+
+version: 2
+
+changes:
+  - version: 1
+    note: Initial version — appointment, recurring.
+  - version: 2
+    note: >
+      Breaking: the title is gone (the first line is part of the body); a
+      primary keyword is no longer required; relationship lines, state lines
+      and the extra block are added to the syntax; new roles property and
+      state; new value type path; media.
+
+keywords:
+  appointment:
+    role: primary
+    args:
+      - { name: date, type: date }
+    excludes: [recurring]
+    meaning: The item falls on `date` only.
+
+  recurring:
+    role: primary
+    args:
+      - { name: weekday, type: weekday }
+    options:
+      until:
+        type: [date, month]
+        meaning: >
+          Last day on which the item falls, inclusive. A `month` means that
+          month's last day.
+    excludes: [appointment]
+    meaning: >
+      The item falls on every `weekday`, with no start bound, up to and
+      including `until` when given.
+
+  media:
+    role: property
+    args:
+      - { name: file, type: path }
+    meaning: >
+      The item's attached image or video. The file extension decides which:
+      jpg jpeg png gif webp bmp are images, mp4 webm mov are videos.

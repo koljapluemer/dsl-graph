@@ -20,3 +20,7 @@ reinstall target:
         npm run build:rpm
         sudo rpm -Uvh --force ./dist/*.rpm
     fi
+
+# Copy the item language's keyword schema in from the sibling dsl repo
+sync-spec:
+    cp ../dsl/spec/keywords.yaml spec/keywords.yaml

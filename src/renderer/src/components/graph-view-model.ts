@@ -37,7 +37,6 @@ export interface ViewCallbacks {
   onPinNote: (filename: string) => void
   onUnpinNote: (filename: string) => void
   onChangeDepth: (filename: string, nextDepth: number) => void
-  onDeleteNoteEntry: (filename: string, index: number) => Promise<void>
   onExpandHiddenRelations: (filename: string) => void
 }
 
@@ -114,8 +113,7 @@ export function buildView(
         onUpdateExtra: callbacks.onUpdateExtra,
         onPin: callbacks.onPinNote,
         onUnpin: callbacks.onUnpinNote,
-        onChangeDepth: callbacks.onChangeDepth,
-        onDeleteNoteEntry: callbacks.onDeleteNoteEntry
+        onChangeDepth: callbacks.onChangeDepth
       }
     }
   })

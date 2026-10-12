@@ -65,7 +65,7 @@ export interface UseElkLayoutResult {
  * A note without a slot is rendered invisibly (see buildView) so React Flow can
  * measure it. ELK runs only once every note has a height, and only when the
  * current layout does not already account for the graph's structure and those
- * heights - so a content-only change (an `extra` edit, a timestamp) never moves
+ * heights - so a content-only change (an `extra` edit) never moves
  * anything. Plus the "seed new nodes next to the note that was just acted on"
  * anchoring and `applyManualDrop` for the on-drop separation. Suspended while a
  * node is being dragged.

@@ -52,9 +52,8 @@ export function useNoteGraph(): UseNoteGraphResult {
       if (pins.size === 0) {
         setGraph(EMPTY_GRAPH)
         // On the transition from some pins to none, still tell the backend the
-        // set is now empty (no graph fetch needed) so its record of "what was
-        // pinned last" stays accurate - that record is what `opened` timestamps
-        // are diffed against, so a later re-pin still counts as a fresh open.
+        // set is now empty (no graph fetch needed) so the pin set it persists
+        // for the next start stays accurate.
         if (hadPinsRef.current) {
           hadPinsRef.current = false
           void window.api.notes.openGraph([]).catch(() => {})

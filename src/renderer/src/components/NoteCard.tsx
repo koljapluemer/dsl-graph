@@ -1,4 +1,4 @@
-import { ExternalLink, FileText, GripVertical, Maximize2, Pencil, Trash2, X } from 'lucide-react'
+import { ExternalLink, FileText, GripVertical, Maximize2, Pencil, Trash2 } from 'lucide-react'
 import { memo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -19,8 +19,7 @@ function NoteCard({
   onUpdateExtra,
   onPin,
   onUnpin,
-  onChangeDepth,
-  onDeleteNoteEntry
+  onChangeDepth
 }: {
   note: GraphNodePayload
   pinDepth: number | null
@@ -31,7 +30,6 @@ function NoteCard({
   onPin: (filename: string) => void
   onUnpin: (filename: string) => void
   onChangeDepth: (filename: string, nextDepth: number) => void
-  onDeleteNoteEntry: (filename: string, index: number) => Promise<void>
 }): React.JSX.Element {
   const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -179,30 +177,6 @@ function NoteCard({
           <p className="italic text-base-content/50">Empty note</p>
         )}
       </div>
-
-      {note.notes.length > 0 ? (
-        <div className="mt-3 space-y-2">
-          {note.notes.map((entry, index) => (
-            <div
-              key={index}
-              className="flex items-start justify-between gap-2  border border-accent/40 bg-accent/10 px-3 py-2 text-sm text-accent"
-            >
-              <p className="whitespace-pre-wrap">{entry}</p>
-              <button
-                type="button"
-                className="btn btn-ghost btn-xs shrink-0 rounded-full text-accent hover:bg-accent/20"
-                onClick={(event) => {
-                  event.stopPropagation()
-                  void onDeleteNoteEntry(note.filename, index)
-                }}
-                title="Delete this note"
-              >
-                <X className="size-3.5" />
-              </button>
-            </div>
-          ))}
-        </div>
-      ) : null}
 
       {extraModalOpen ? (
         <ExtraContentModal

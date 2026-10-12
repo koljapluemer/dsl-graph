@@ -218,8 +218,8 @@ export function useGraphInteraction({
     ): Promise<void> => {
       await window.api.notes.updateNote({ filename, body, extraContent })
 
-      // Image is stored out-of-band (a loose `images/` file, no JSON key), so it
-      // reconciles separately from the note body.
+      // Media has its own endpoints (they write the file and the note's `media`
+      // line), so it reconciles separately from the note body.
       if (image?.status === 'new') {
         await window.api.notes.attachImage({ filename, dataUrl: image.dataUrl })
       } else if (image === null && previousImage !== null) {
@@ -237,13 +237,6 @@ export function useGraphInteraction({
   const handleUpdateExtra = useCallback(
     async (filename: string, patch: { body: string; extraContent: string }): Promise<void> => {
       await window.api.notes.updateNote({ filename, ...patch })
-    },
-    []
-  )
-
-  const handleDeleteNoteEntry = useCallback(
-    async (filename: string, index: number): Promise<void> => {
-      await window.api.notes.deleteNoteEntry({ filename, index })
     },
     []
   )
@@ -329,7 +322,6 @@ export function useGraphInteraction({
       onPinNote: handlePinNote,
       onUnpinNote,
       onChangeDepth: onSetPinDepth,
-      onDeleteNoteEntry: handleDeleteNoteEntry,
       onExpandHiddenRelations: handleExpandHiddenRelations
     }),
     [
@@ -344,7 +336,6 @@ export function useGraphInteraction({
       handlePinNote,
       onUnpinNote,
       onSetPinDepth,
-      handleDeleteNoteEntry,
       handleExpandHiddenRelations
     ]
   )

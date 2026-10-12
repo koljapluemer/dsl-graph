@@ -415,7 +415,7 @@ function UnavailableState({
           ? 'No notes indexed yet'
           : 'Graph unavailable'
 
-  const message = bootstrap?.message ?? 'Choose the folder that contains your JSON notes.'
+  const message = bootstrap?.message ?? 'Choose the folder that contains your notes.'
 
   return (
     <div className="flex h-full items-center justify-center border border-dashed border-base-300 bg-base-100/70 px-8 text-center">

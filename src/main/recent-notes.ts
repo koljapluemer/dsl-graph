@@ -2,26 +2,20 @@ import {
   NOTE_LIST_PAGE_SIZE,
   type IndexedNote,
   type RecentNote,
-  type RecentNotesResponse,
-  type RecentNotesSort
+  type RecentNotesResponse
 } from '../shared/notes'
 import { buildNotePreview } from './note-preview'
 
-interface RankedNote {
-  note: IndexedNote
-  timestamp: string
-}
-
-/** Newest first; equal timestamps fall back to filename so the order is stable across refreshes. */
-function compareRecency(a: RankedNote, b: RankedNote): number {
-  if (a.timestamp !== b.timestamp) {
-    return a.timestamp > b.timestamp ? -1 : 1
+/** Newest first; equal mtimes fall back to filename so the order is stable across refreshes. */
+function compareRecency(a: IndexedNote, b: IndexedNote): number {
+  if (a.mtimeMs !== b.mtimeMs) {
+    return b.mtimeMs - a.mtimeMs
   }
-  return a.note.filename < b.note.filename ? -1 : a.note.filename > b.note.filename ? 1 : 0
+  return a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0
 }
 
 /** Index at which `candidate` belongs in `ranked` (already ordered by compareRecency). */
-function findInsertionIndex(ranked: RankedNote[], candidate: RankedNote): number {
+function findInsertionIndex(ranked: IndexedNote[], candidate: IndexedNote): number {
   let low = 0
   let high = ranked.length
   while (low < high) {
@@ -35,46 +29,30 @@ function findInsertionIndex(ranked: RankedNote[], candidate: RankedNote): number
   return low
 }
 
-function toRecentNote({ note, timestamp }: RankedNote): RecentNote {
-  return {
-    filename: note.filename,
-    preview: buildNotePreview(note),
-    timestamp
-  }
+function toRecentNote(note: IndexedNote): RecentNote {
+  return { filename: note.filename, preview: buildNotePreview(note) }
 }
 
 /**
- * One page of notes by the chosen lifecycle timestamp, newest first, plus how many
- * notes carry that timestamp at all. One pass over the index keeping a ranking
- * bounded to the end of the requested page, so cost stays O(n log k) with no full
- * sort, and previews are built for the returned page only. Notes never stamped
- * with that timestamp are skipped. ISO-8601 UTC strings order chronologically
- * under plain string comparison, which is all this store writes.
+ * One page of notes by file modification time, newest first, plus the total
+ * count. One pass over the index keeping a ranking bounded to the end of the
+ * requested page, so cost stays O(n log k) with no full sort, and previews are
+ * built for the returned page only.
  */
-export function selectRecentNotes(
-  notes: Iterable<IndexedNote>,
-  sort: RecentNotesSort,
-  page: number
-): RecentNotesResponse {
+export function selectRecentNotes(notes: Iterable<IndexedNote>, page: number): RecentNotesResponse {
   const start = page * NOTE_LIST_PAGE_SIZE
   const bound = start + NOTE_LIST_PAGE_SIZE
-  const ranked: RankedNote[] = []
+  const ranked: IndexedNote[] = []
   let total = 0
 
   for (const note of notes) {
-    const timestamp = note[sort]
-    if (timestamp === null) {
-      continue
-    }
-
     total += 1
-    const candidate = { note, timestamp }
-    const index = findInsertionIndex(ranked, candidate)
+    const index = findInsertionIndex(ranked, note)
     if (index >= bound) {
       continue
     }
 
-    ranked.splice(index, 0, candidate)
+    ranked.splice(index, 0, note)
     if (ranked.length > bound) {
       ranked.pop()
     }

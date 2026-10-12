@@ -1,20 +1,36 @@
 import { randomBytes } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises'
-import { basename, join } from 'node:path'
+import { mkdir, readFile, readdir, stat, unlink, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import { Document } from 'flexsearch'
 import { RE2 } from 're2-wasm'
 import { GraphWatcher, type GraphChangeBatch } from './graph-watcher'
 import {
   IMAGES_DIR_NAME,
-  IMAGE_STEM_PATTERN,
+  isNoteFilename,
   SUPPORTED_IMAGE_EXTENSIONS,
   SUPPORTED_MEDIA_EXTENSIONS,
   SUPPORTED_VIDEO_EXTENSIONS
 } from './graph-fs'
 import { MAX_VIDEO_ATTACHMENT_BYTES } from '../shared/media'
+import { errorsOf, parseDocument, type Document as ItemDocument } from './dsl/document'
+import { ITEM_SCHEMA } from './dsl/item-schema'
+import { serializeDocument } from './dsl/serialize'
+import {
+  UNLABELED_RELATION,
+  addRelation,
+  newNoteDocument,
+  noteFilename,
+  noteStem,
+  readNoteContent,
+  relabelRelation,
+  removeRelation,
+  setBody,
+  setExtra,
+  setMedia
+} from './note-file'
 import { selectRecentNotes } from './recent-notes'
 import { buildMatchDisplay, locateFuzzyMatch, type LocatedMatch } from './search-match-display'
 import {
@@ -32,7 +48,6 @@ import type {
   ConnectNotesResponse,
   CreateNoteRequest,
   CreateNoteResponse,
-  DeleteNoteEntryRequest,
   DeleteNoteRequest,
   DeleteRelationRequest,
   GraphEdgePayload,
@@ -41,7 +56,6 @@ import type {
   IndexProgress,
   NoteGraph,
   NoteLink,
-  NoteRelationTuple,
   NotesBootstrap,
   NotesGraphResponse,
   NotesSearchRequest,
@@ -51,7 +65,6 @@ import type {
   RandomNoteResponse,
   RandomOrphanRequest,
   RandomOrphanResponse,
-  RawNoteFile,
   RecentNotesRequest,
   RecentNotesResponse,
   SearchCriteria,
@@ -130,6 +143,12 @@ function normalizeMediaExtension(kind: 'image' | 'video', subtype: string): stri
   return lower === 'quicktime' ? 'mov' : lower
 }
 
+/** Whether this app wrote the media file and may delete it: directly inside `images/`. */
+function isManagedMedia(path: string): boolean {
+  const [dir, name, ...rest] = path.split('/')
+  return dir === IMAGES_DIR_NAME && name !== undefined && rest.length === 0
+}
+
 interface SearchDocument extends Record<string, string> {
   id: string
   body: string
@@ -161,25 +180,15 @@ interface RelationDraft {
 }
 
 interface PendingNoteImage {
-  /** The exact `images/` filename to restore the bytes under on undo. */
-  filename: string
+  /** The note's media path (relative to the graph folder) to restore the bytes under on undo. */
+  path: string
   data: Buffer
 }
 
 /** The single most recent deletion, kept just long enough for the UI's undo popup to act on it. */
 type PendingUndo =
-  | {
-      type: 'note'
-      filename: string
-      raw: string
-      image: PendingNoteImage | null
-      /** Notes that had `relationshipsChanged` stamped because they were wired to the deleted note - re-stamped on undo. */
-      neighbors: string[]
-    }
-  | { type: 'relation'; source: string; relation: NoteRelationTuple }
-
-/** Lifecycle timestamp keys this store stamps into note files (see RawNoteFile). */
-type NoteTimestampField = 'created' | 'updated' | 'opened' | 'relationshipsChanged'
+  | { type: 'note'; filename: string; raw: string; image: PendingNoteImage | null }
+  | { type: 'relation'; source: string; relation: NoteLink }
 
 interface GraphBuildContext {
   nodes: Map<string, NodeMeta>
@@ -189,11 +198,10 @@ interface GraphBuildContext {
   skippedNodes: number
 }
 
-/** One unit of incremental index work: note files to (re)read, note files gone, and note stems whose image may have changed. */
+/** One unit of incremental index work: note files to (re)read and note files gone. */
 interface IndexChangeSet {
   upsert: string[]
   remove: string[]
-  imageStems: string[]
 }
 
 /** Search-worker corpus delta accumulated across one applyFileChanges pass. */
@@ -216,8 +224,8 @@ export class NoteStore extends EventEmitter {
   private graphPath = ''
   private lastPins: PinSpec[] = []
   private notes = new Map<string, IndexedNote>()
-  /** noteStem -> newest matching filename in `images/`, rebuilt from a single directory scan each index. */
-  private imagesByStem = new Map<string, string>()
+  /** Media path -> how many indexed notes reference it, kept in step with `notes`. */
+  private mediaRefs = new Map<string, number>()
   private reverseRefs = new Map<string, IncomingRelation[]>()
   private searchIndex = this.createSearchIndex()
   private status: NotesBootstrap['status'] = 'no-folder'
@@ -576,7 +584,6 @@ export class NoteStore extends EventEmitter {
     await this.ensureIndexed()
     this.assertIndexReady()
 
-    await this.stampNewlyPinned(pins)
     this.lastPins = pins
     await this.persistSettings()
 
@@ -594,35 +601,25 @@ export class NoteStore extends EventEmitter {
     }
 
     const filename = this.generateFilename(request.body)
-    const now = new Date().toISOString()
+    const doc = newNoteDocument(request.body)
 
     if (!request.relatedFilename) {
-      await this.writeNoteFile(filename, { body: request.body, rels: [] })
-      await this.stampTimestamps(filename, ['created', 'updated', 'opened'], now)
+      await this.writeNote(filename, doc)
       await this.applyLocalChange({ upsert: [filename] })
       return { filename }
     }
 
-    const label = (request.label ?? '').trim() || 'related'
+    const label = (request.label ?? '').trim() || UNLABELED_RELATION
 
     if (request.reverse) {
-      await this.writeNoteFile(filename, {
-        body: request.body,
-        rels: [[label, request.relatedFilename]]
-      })
+      addRelation(doc, { label, target: request.relatedFilename })
+      await this.writeNote(filename, doc)
     } else {
-      await this.writeNoteFile(filename, { body: request.body, rels: [] })
-      await this.appendRelation(request.relatedFilename, [label, filename])
+      await this.writeNote(filename, doc)
+      await this.mutateNote(request.relatedFilename, (related) =>
+        addRelation(related, { label, target: filename })
+      )
     }
-
-    // Both ends of the new relationship changed: the new note carries it (or is
-    // its target), and the related note gained an edge in the other direction.
-    await this.stampTimestamps(
-      filename,
-      ['created', 'updated', 'opened', 'relationshipsChanged'],
-      now
-    )
-    await this.stampTimestamps(request.relatedFilename, ['relationshipsChanged'], now)
 
     await this.applyLocalChange({ upsert: [filename, request.relatedFilename] })
 
@@ -641,39 +638,18 @@ export class NoteStore extends EventEmitter {
     const raw = await readFile(path, 'utf8')
 
     // Kept in memory (not just deleted-and-forgotten) for the same reason the note's
-    // own raw JSON is: `undoDelete` needs to be able to fully restore the note,
-    // image included, without a permanently-broken image reference.
+    // own text is: `undoDelete` needs to be able to fully restore the note, media
+    // included, without a permanently-broken media reference.
     let image: PendingNoteImage | null = null
     if (existing.image) {
-      try {
-        const data = await readFile(this.imageFilePath(existing.image))
-        image = { filename: existing.image, data }
-      } catch (error) {
-        const maybeError = error as NodeJS.ErrnoException
-        if (maybeError.code !== 'ENOENT') {
-          throw error
-        }
-      }
-      await this.deleteImageFiles(this.stemOf(request.filename))
-    }
-
-    // Every surviving note wired to this one loses a relationship as it goes.
-    const neighbors = this.relationNeighbors(request.filename).filter((name) =>
-      this.notes.has(name)
-    )
-    const now = new Date().toISOString()
-    for (const neighbor of neighbors) {
-      await this.stampTimestamps(neighbor, ['relationshipsChanged'], now)
+      image = await this.readMediaForUndo(existing.image)
+      await this.releaseMedia(request.filename, existing.image)
     }
 
     this.markSelfWrite(path)
     await unlink(path)
-    this.pendingUndo = { type: 'note', filename: request.filename, raw, image, neighbors }
-    await this.applyLocalChange({
-      remove: [request.filename],
-      upsert: neighbors,
-      imageStems: existing.image ? [this.stemOf(request.filename)] : []
-    })
+    this.pendingUndo = { type: 'note', filename: request.filename, raw, image }
+    await this.applyLocalChange({ remove: [request.filename] })
   }
 
   async findOrphanedMedia(): Promise<{ count: number }> {
@@ -685,20 +661,7 @@ export class NoteStore extends EventEmitter {
     await this.ensureIndexed()
 
     const orphanedFiles = await this.orphanedMediaFiles()
-    await Promise.all(
-      orphanedFiles.map(async (filename) => {
-        const path = this.imageFilePath(filename)
-        this.markSelfWrite(path)
-        try {
-          await unlink(path)
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-            throw error
-          }
-        }
-      })
-    )
-    await this.scanImages()
+    await Promise.all(orphanedFiles.map((path) => this.unlinkIfPresent(join(this.graphPath, path))))
 
     return { deletedCount: orphanedFiles.length }
   }
@@ -706,39 +669,27 @@ export class NoteStore extends EventEmitter {
   async updateNote(request: UpdateNoteRequest): Promise<void> {
     await this.ensureIndexed()
 
-    const existing = this.notes.get(request.filename)
-    if (!existing) {
+    if (!this.notes.has(request.filename)) {
       throw new Error(`Could not find "${request.filename}" in ${this.graphPath}.`)
     }
 
-    const contentChanged =
-      existing.body !== request.body || existing.extraContent !== request.extraContent
-    const now = new Date().toISOString()
-
-    await this.mutateRawNote(request.filename, (parsed) => {
-      parsed.body = request.body
-      if (request.extraContent.trim().length > 0) {
-        parsed.extra = request.extraContent
-      } else {
-        delete parsed.extra
-      }
-      if (contentChanged) {
-        this.applyTimestampStamp(parsed, ['updated', 'opened'], now)
-      }
+    await this.mutateNote(request.filename, (doc) => {
+      setBody(doc, request.body)
+      setExtra(doc, request.extraContent)
     })
 
     await this.applyLocalChange({ upsert: [request.filename] })
   }
 
   /**
-   * Writes `dataUrl`'s bytes to `images/<noteStem>-<epochMillis><ext>`, replacing
-   * any image or video already attached to that note. The note JSON is untouched -
-   * the link is by filename stem (see `../note`).
+   * Writes `dataUrl`'s bytes to `images/<noteStem>-<epochMillis>.<ext>` and points
+   * the note's `media` line at it, replacing any image or video already attached.
    */
   async attachImage(request: AttachImageRequest): Promise<AttachImageResponse> {
     await this.ensureIndexed()
 
-    if (!this.notes.has(request.filename)) {
+    const note = this.notes.get(request.filename)
+    if (!note) {
       throw new Error(`Could not find "${request.filename}" in ${this.graphPath}.`)
     }
 
@@ -765,29 +716,33 @@ export class NoteStore extends EventEmitter {
       }
     }
 
-    const stem = this.stemOf(request.filename)
-    await this.deleteImageFiles(stem)
-
-    const image = `${stem}-${Date.now()}.${extension}`
+    const image = `${IMAGES_DIR_NAME}/${noteStem(request.filename)}-${Date.now()}.${extension}`
     await mkdir(this.imagesDir(), { recursive: true })
-    const imagePath = this.imageFilePath(image)
-    this.markSelfWrite(imagePath)
-    await writeFile(imagePath, Buffer.from(base64, 'base64'))
+    await writeFile(join(this.graphPath, image), Buffer.from(base64, 'base64'))
+    await this.mutateNote(request.filename, (doc) => setMedia(doc, image))
+    if (note.image) {
+      await this.releaseMedia(request.filename, note.image)
+    }
 
-    await this.applyLocalChange({ imageStems: [stem] })
+    await this.applyLocalChange({ upsert: [request.filename] })
     return { image }
   }
 
-  /** Removes whatever image is attached to the note (its `images/` file[s]); no-op if none. */
+  /** Removes the note's `media` line and the file it pointed at; no-op if none. */
   async clearImage(request: ClearImageRequest): Promise<void> {
     await this.ensureIndexed()
 
-    if (!this.notes.has(request.filename)) {
+    const note = this.notes.get(request.filename)
+    if (!note) {
       throw new Error(`Could not find "${request.filename}" in ${this.graphPath}.`)
     }
+    if (!note.image) {
+      return
+    }
 
-    await this.deleteImageFiles(this.stemOf(request.filename))
-    await this.applyLocalChange({ imageStems: [this.stemOf(request.filename)] })
+    await this.mutateNote(request.filename, (doc) => setMedia(doc, null))
+    await this.releaseMedia(request.filename, note.image)
+    await this.applyLocalChange({ upsert: [request.filename] })
   }
 
   async connectNotes(request: ConnectNotesRequest): Promise<ConnectNotesResponse> {
@@ -800,12 +755,10 @@ export class NoteStore extends EventEmitter {
       throw new Error(`Could not find "${request.target}" in ${this.graphPath}.`)
     }
 
-    const label = request.label.trim() || 'related'
-    await this.appendRelation(request.source, [label, request.target])
-
-    const now = new Date().toISOString()
-    await this.stampTimestamps(request.source, ['relationshipsChanged'], now)
-    await this.stampTimestamps(request.target, ['relationshipsChanged'], now)
+    const label = request.label.trim() || UNLABELED_RELATION
+    await this.mutateNote(request.source, (doc) =>
+      addRelation(doc, { label, target: request.target })
+    )
 
     await this.applyLocalChange({ upsert: [request.source, request.target] })
 
@@ -814,46 +767,22 @@ export class NoteStore extends EventEmitter {
 
   async updateRelationLabel(request: UpdateRelationRequest): Promise<void> {
     await this.ensureIndexed()
-    await this.mutateRelations(request.source, (rels) => {
-      const index = rels.findIndex(
-        ([label, target]) => label === request.label && target === request.target
+    await this.mutateNote(request.source, (doc) =>
+      relabelRelation(
+        doc,
+        { label: request.label, target: request.target },
+        request.nextLabel.trim() || request.label
       )
-      if (index === -1) {
-        throw new Error(`Could not find that relationship in "${request.source}".`)
-      }
-      rels[index] = [request.nextLabel.trim() || request.label, request.target]
-    })
-
-    const now = new Date().toISOString()
-    await this.stampTimestamps(request.source, ['relationshipsChanged'], now)
-    if (this.notes.has(request.target)) {
-      await this.stampTimestamps(request.target, ['relationshipsChanged'], now)
-    }
+    )
 
     await this.applyLocalChange({ upsert: [request.source, request.target] })
   }
 
   async deleteRelation(request: DeleteRelationRequest): Promise<void> {
-    let removed: NoteRelationTuple | null = null
+    const relation: NoteLink = { label: request.label, target: request.target }
+    await this.mutateNote(request.source, (doc) => removeRelation(doc, relation))
 
-    await this.mutateRelations(request.source, (rels) => {
-      const index = rels.findIndex(
-        ([label, target]) => label === request.label && target === request.target
-      )
-      if (index === -1) {
-        throw new Error(`Could not find that relationship in "${request.source}".`)
-      }
-      removed = rels[index]
-      rels.splice(index, 1)
-    })
-
-    const now = new Date().toISOString()
-    await this.stampTimestamps(request.source, ['relationshipsChanged'], now)
-    if (this.notes.has(request.target)) {
-      await this.stampTimestamps(request.target, ['relationshipsChanged'], now)
-    }
-
-    this.pendingUndo = { type: 'relation', source: request.source, relation: removed! }
+    this.pendingUndo = { type: 'relation', source: request.source, relation }
     await this.applyLocalChange({ upsert: [request.source, request.target] })
   }
 
@@ -870,36 +799,14 @@ export class NoteStore extends EventEmitter {
       this.markSelfWrite(notePath)
       await writeFile(notePath, pending.raw, 'utf8')
       if (pending.image) {
-        await mkdir(this.imagesDir(), { recursive: true })
-        const imagePath = this.imageFilePath(pending.image.filename)
-        this.markSelfWrite(imagePath)
+        const imagePath = join(this.graphPath, pending.image.path)
+        await mkdir(dirname(imagePath), { recursive: true })
         await writeFile(imagePath, pending.image.data)
       }
-
-      // The relationships that vanished with the note are back - re-stamp the
-      // same set the delete stamped, plus the note itself now that it exists.
-      const now = new Date().toISOString()
-      const revived = pending.neighbors.filter((name) => this.notes.has(name))
-      await this.stampTimestamps(pending.filename, ['relationshipsChanged'], now)
-      for (const neighbor of revived) {
-        await this.stampTimestamps(neighbor, ['relationshipsChanged'], now)
-      }
-
-      await this.applyLocalChange({
-        upsert: [pending.filename, ...revived],
-        imageStems: pending.image ? [this.stemOf(pending.filename)] : []
-      })
+      await this.applyLocalChange({ upsert: [pending.filename] })
     } else {
-      await this.appendRelation(pending.source, pending.relation)
-
-      const now = new Date().toISOString()
-      const [, target] = pending.relation
-      await this.stampTimestamps(pending.source, ['relationshipsChanged'], now)
-      if (this.notes.has(target)) {
-        await this.stampTimestamps(target, ['relationshipsChanged'], now)
-      }
-
-      await this.applyLocalChange({ upsert: [pending.source, target] })
+      await this.mutateNote(pending.source, (doc) => addRelation(doc, pending.relation))
+      await this.applyLocalChange({ upsert: [pending.source, pending.relation.target] })
     }
 
     return { restored: true }
@@ -916,7 +823,7 @@ export class NoteStore extends EventEmitter {
     await this.ensureIndexed()
     this.assertIndexReady()
 
-    return selectRecentNotes(this.notes.values(), request.sort, request.page)
+    return selectRecentNotes(this.notes.values(), request.page)
   }
 
   async randomNote(request: RandomNoteRequest): Promise<RandomNoteResponse> {
@@ -949,32 +856,6 @@ export class NoteStore extends EventEmitter {
     }
 
     return candidates[Math.floor(Math.random() * candidates.length)]
-  }
-
-  async deleteNoteEntry(request: DeleteNoteEntryRequest): Promise<void> {
-    await this.ensureIndexed()
-
-    const existing = this.notes.get(request.filename)
-    if (!existing) {
-      throw new Error(`Could not find "${request.filename}" in ${this.graphPath}.`)
-    }
-
-    const now = new Date().toISOString()
-    await this.mutateRawNote(request.filename, (parsed) => {
-      const notes = Array.isArray(parsed.notes) ? (parsed.notes as unknown[]) : []
-      if (request.index < 0 || request.index >= notes.length) {
-        throw new Error(`Note index ${request.index} out of range for "${request.filename}".`)
-      }
-      notes.splice(request.index, 1)
-      if (notes.length > 0) {
-        parsed.notes = notes
-      } else {
-        delete parsed.notes
-      }
-      this.applyTimestampStamp(parsed, ['updated', 'opened'], now)
-    })
-
-    await this.applyLocalChange({ upsert: [request.filename] })
   }
 
   async loadSettings(): Promise<void> {
@@ -1057,7 +938,7 @@ export class NoteStore extends EventEmitter {
     try {
       const entries = await readdir(this.graphPath, { withFileTypes: true })
       dirEntries = entries
-        .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+        .filter((entry) => entry.isFile() && isNoteFilename(entry.name))
         .map((entry) => entry.name)
         .sort((left, right) => left.localeCompare(right))
     } catch (error) {
@@ -1069,13 +950,10 @@ export class NoteStore extends EventEmitter {
 
     if (dirEntries.length === 0) {
       this.status = 'empty'
-      this.message = `No JSON note files were found in ${this.graphPath}.`
+      this.message = `No note files (*.txt) were found in ${this.graphPath}.`
       this.hasIndexed = true
       return
     }
-
-    // Populated before notes are read - readNoteFile resolves each note's image from here.
-    await this.scanImages()
 
     const batchSize = 200
     const corpusEntries: RawSearchCorpusEntry[] = []
@@ -1095,6 +973,7 @@ export class NoteStore extends EventEmitter {
         }
 
         this.notes.set(note.filename, note)
+        this.trackMedia(null, note.image)
 
         const doc: SearchDocument = {
           id: note.filename,
@@ -1122,7 +1001,7 @@ export class NoteStore extends EventEmitter {
     this.rawCorpusIndex = new Map(corpusEntries.map((entry, index) => [entry.filename, index]))
     this.syncSearchWorker()
 
-    await this.repairDanglingRelations()
+    this.repairDanglingRelations()
 
     for (const note of this.notes.values()) {
       for (const rel of note.rels) {
@@ -1155,8 +1034,7 @@ export class NoteStore extends EventEmitter {
     await this.enqueue(() =>
       this.applyFileChanges({
         upsert: change.upsert ?? [],
-        remove: change.remove ?? [],
-        imageStems: change.imageStems ?? []
+        remove: change.remove ?? []
       })
     )
   }
@@ -1164,7 +1042,7 @@ export class NoteStore extends EventEmitter {
   /**
    * The single incremental-apply path, shared by in-app mutations, the watcher,
    * and the safety reconcile. Preserves the ordering `runFullIndex` relies on:
-   * images -> notes+corpus -> scoped repair -> reverseRefs -> degree.
+   * notes+corpus -> scoped repair -> reverseRefs -> degree.
    * Emits `NOTES_CHANGED_EVENT` exactly once.
    */
   private async applyFileChanges(change: IndexChangeSet): Promise<void> {
@@ -1178,7 +1056,7 @@ export class NoteStore extends EventEmitter {
     }
 
     const touched = change.upsert.length + change.remove.length
-    if (touched === 0 && change.imageStems.length === 0) {
+    if (touched === 0) {
       return
     }
     if (touched > INCREMENTAL_BATCH_LIMIT) {
@@ -1190,13 +1068,10 @@ export class NoteStore extends EventEmitter {
     const delta: WorkerDelta = { upserts: [], removals: [] }
     const affected = new Set<string>()
     const relSources = new Set<string>()
-    const removedOrEmptied = new Set<string>()
+    const removed = new Set<string>()
     // Notes that did not exist before this batch - their appearance can un-break
     // a rel that was previously dropped as dangling.
     const newlyAdded = new Set<string>()
-    // Notes that just regained a body - like newlyAdded, they can un-break a rel
-    // that was previously dropped as dangling.
-    const unEmptied = new Set<string>()
     const prevRelTargets = new Map<string, string[]>()
 
     // Reads one note and folds it in, recording the blast radius. Idempotent
@@ -1208,9 +1083,6 @@ export class NoteStore extends EventEmitter {
       const { prev, next } = await this.indexNote(filename, delta)
       if (!prev && next) {
         newlyAdded.add(filename)
-      }
-      if (prev && next && this.isEmptyBody(prev) && !this.isEmptyBody(next)) {
-        unEmptied.add(filename)
       }
       relSources.add(filename)
       affected.add(filename)
@@ -1224,25 +1096,12 @@ export class NoteStore extends EventEmitter {
       for (const rel of next?.rels ?? []) {
         affected.add(rel.target)
       }
-      if (!next || this.isEmptyBody(next)) {
-        removedOrEmptied.add(filename)
+      if (!next) {
+        removed.add(filename)
       }
     }
 
-    // 1. Images first, so a re-read note resolves its current image.
-    if (change.imageStems.length > 0) {
-      await this.scanImages()
-      for (const stem of new Set(change.imageStems)) {
-        const filename = `${stem}.json`
-        const note = this.notes.get(filename)
-        if (note) {
-          note.image = this.imagesByStem.get(stem) ?? null
-          affected.add(filename)
-        }
-      }
-    }
-
-    // 2a. Read every upserted note into place (rels not yet repaired - a batch can
+    // 1a. Read every upserted note into place (rels not yet repaired - a batch can
     //     contain both ends of a new relation, in any order).
     for (const filename of change.upsert) {
       await processUpsert(filename)
@@ -1252,7 +1111,7 @@ export class NoteStore extends EventEmitter {
       const prev = this.unindexNote(filename, delta)
       relSources.add(filename)
       affected.add(filename)
-      removedOrEmptied.add(filename)
+      removed.add(filename)
       prevRelTargets.set(
         filename,
         (prev?.rels ?? []).map((rel) => rel.target)
@@ -1273,10 +1132,10 @@ export class NoteStore extends EventEmitter {
       }
     }
 
-    // 2b. A note that just appeared (or regained a body) may make a previously
-    //     dangling rel valid again - re-read those senders from disk.
+    // 1b. A note that just appeared may make a previously dangling rel valid
+    //     again - re-read those senders from disk.
     const reviveSources = new Set<string>()
-    for (const filename of [...newlyAdded, ...unEmptied]) {
+    for (const filename of newlyAdded) {
       for (const source of this.danglingRefSources.get(filename) ?? []) {
         reviveSources.add(source)
       }
@@ -1286,16 +1145,15 @@ export class NoteStore extends EventEmitter {
       await processUpsert(source)
     }
 
-    // 3. Repair dangling rels: on every note just read (it may carry rels to
-    //    missing/empty targets) and on every note that pointed at something just
-    //    removed or emptied.
+    // 2. Repair dangling rels: on every note just read (it may carry rels to
+    //    missing targets) and on every note that pointed at something just removed.
     const repairCandidates = new Set<string>([...relSources])
-    for (const trigger of removedOrEmptied) {
+    for (const trigger of removed) {
       for (const incoming of this.reverseRefs.get(trigger) ?? []) {
         repairCandidates.add(incoming.source)
       }
     }
-    const repaired = await this.repairRelsOf(repairCandidates)
+    const repaired = this.repairRelsOf(repairCandidates)
     for (const [source, targetsBeforeRepair] of repaired) {
       relSources.add(source)
       affected.add(source)
@@ -1307,7 +1165,7 @@ export class NoteStore extends EventEmitter {
       }
     }
 
-    // 4. reverseRefs: rebuild every changed source's contributions.
+    // 3. reverseRefs: rebuild every changed source's contributions.
     for (const source of relSources) {
       const current = this.notes.get(source)?.rels ?? []
       this.repatchReverseRefs(source, prevRelTargets.get(source) ?? [], current)
@@ -1318,13 +1176,13 @@ export class NoteStore extends EventEmitter {
       }
     }
 
-    // 5. degree.
+    // 4. degree.
     this.repatchDegrees(affected)
 
-    // 6. hand the search worker just the delta.
+    // 5. hand the search worker just the delta.
     this.postWorkerDelta(delta.upserts, delta.removals)
 
-    // 7. one signal per batch.
+    // 6. one signal per batch.
     this.emit(NOTES_CHANGED_EVENT)
   }
 
@@ -1347,6 +1205,7 @@ export class NoteStore extends EventEmitter {
     }
 
     this.notes.set(filename, next)
+    this.trackMedia(prev?.image ?? null, next.image)
 
     const doc: SearchDocument = { id: filename, body: next.body, extra: next.extraContent }
     if (prev) {
@@ -1373,6 +1232,7 @@ export class NoteStore extends EventEmitter {
       return null
     }
     this.notes.delete(filename)
+    this.trackMedia(prev.image, null)
     this.searchIndex.remove(filename)
     this.removeFromRawCorpus(filename)
     delta.removals.push(filename)
@@ -1488,27 +1348,14 @@ export class NoteStore extends EventEmitter {
     const notSelfWrite = (name: string): boolean =>
       !this.consumeSelfWrite(join(this.graphPath, name))
 
-    const upsert = [...batch.notes.added, ...batch.notes.changed].filter(notSelfWrite)
-    const remove = batch.notes.removed.filter(notSelfWrite)
+    const upsert = [...batch.added, ...batch.changed].filter(notSelfWrite)
+    const remove = batch.removed.filter(notSelfWrite)
 
-    const imageStems: string[] = []
-    if (batch.images.touched) {
-      for (const path of batch.images.paths) {
-        if (this.consumeSelfWrite(path)) {
-          continue
-        }
-        const parsed = this.parseImageName(basename(path))
-        if (parsed) {
-          imageStems.push(parsed.stem)
-        }
-      }
-    }
-
-    if (upsert.length === 0 && remove.length === 0 && imageStems.length === 0) {
+    if (upsert.length === 0 && remove.length === 0) {
       return
     }
 
-    await this.enqueue(() => this.applyFileChanges({ upsert, remove, imageStems }))
+    await this.enqueue(() => this.applyFileChanges({ upsert, remove }))
   }
 
   /**
@@ -1525,7 +1372,7 @@ export class NoteStore extends EventEmitter {
     try {
       const entries = await readdir(this.graphPath, { withFileTypes: true })
       names = entries
-        .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+        .filter((entry) => entry.isFile() && isNoteFilename(entry.name))
         .map((entry) => entry.name)
     } catch {
       return
@@ -1538,9 +1385,7 @@ export class NoteStore extends EventEmitter {
       return
     }
 
-    await this.enqueue(() =>
-      this.applyFileChanges({ upsert: added, remove: removed, imageStems: [] })
-    )
+    await this.enqueue(() => this.applyFileChanges({ upsert: added, remove: removed }))
   }
 
   /** Stops the watcher and tears down the search worker. Call on app shutdown. */
@@ -1568,34 +1413,29 @@ export class NoteStore extends EventEmitter {
     return expiry !== undefined && expiry >= now
   }
 
+  /** Reads and parses one note file; null (with a console warning) when it is unreadable or has syntax errors. */
   private async readNoteFile(filename: string): Promise<IndexedNote | null> {
+    const path = join(this.graphPath, filename)
     try {
-      const raw = await readFile(join(this.graphPath, filename), 'utf8')
-      const parsed = JSON.parse(raw) as RawNoteFile
-      const body = typeof parsed.body === 'string' ? parsed.body : ''
-      const rels = Array.isArray(parsed.rels)
-        ? parsed.rels.flatMap((rel) => this.normalizeRelation(rel))
-        : []
-      const image = this.imagesByStem.get(this.stemOf(filename)) ?? null
-      const extraContent = typeof parsed.extra === 'string' ? parsed.extra : ''
-      const notes = Array.isArray(parsed.notes)
-        ? parsed.notes.filter((entry): entry is string => typeof entry === 'string')
-        : []
+      const [raw, info] = await Promise.all([readFile(path, 'utf8'), stat(path)])
+      const doc = parseDocument(ITEM_SCHEMA, raw)
+      const errors = errorsOf(doc)
+      if (errors.length > 0) {
+        console.warn(`Skipping note ${filename} with syntax errors:`, errors)
+        return null
+      }
 
+      const content = readNoteContent(doc)
       return {
         filename,
-        body,
-        bodyCompact: body.replace(/\s+/g, ' ').trim(),
-        rels,
-        degree: rels.length,
-        image,
-        extraContent,
-        extraCompact: extraContent.replace(/\s+/g, ' ').trim(),
-        notes,
-        created: this.readTimestamp(parsed.created),
-        updated: this.readTimestamp(parsed.updated),
-        opened: this.readTimestamp(parsed.opened),
-        relationshipsChanged: this.readTimestamp(parsed.relationshipsChanged)
+        body: content.body,
+        bodyCompact: content.body.replace(/\s+/g, ' ').trim(),
+        rels: content.rels,
+        degree: content.rels.length,
+        image: content.media,
+        extraContent: content.extraContent,
+        extraCompact: content.extraContent.replace(/\s+/g, ' ').trim(),
+        mtimeMs: info.mtimeMs
       }
     } catch (error) {
       console.warn(`Skipping unreadable note ${filename}:`, error)
@@ -1603,47 +1443,25 @@ export class NoteStore extends EventEmitter {
     }
   }
 
-  private normalizeRelation(rel: unknown): NoteLink[] {
-    if (!Array.isArray(rel) || rel.length < 2) {
-      return []
-    }
-
-    const [label, target] = rel
-    if (typeof label !== 'string' || typeof target !== 'string') {
-      return []
-    }
-
-    return [{ label, target }]
+  /**
+   * A relation can point at a target that isn't an indexed note - most often one
+   * that was just deleted (still within its undo window), or one with syntax
+   * errors. It must never surface as a graph node/edge (see
+   * tckt/issues/do-not-show-broken-nodes.md), so it is dropped from this in-memory
+   * pass only: writing the removal back to disk would make `undoDelete` unable to
+   * fully restore the relationship if the delete is undone a moment later.
+   */
+  private repairDanglingRelations(): void {
+    this.repairRelsOf(this.notes.keys())
   }
 
   /**
-   * A relation can point at a target that no longer resolves to a real, non-empty
-   * note - most often a note that was just deleted (still within its undo window),
-   * or a note whose body was cleared out from under an existing relationship. Either
-   * way it must never surface as a graph node/edge (see tckt/issues/do-not-show-broken-nodes.md).
-   *
-   * The two cases are handled differently on purpose:
-   * - Missing target (deleted note): dropped from this in-memory pass only. Writing
-   *   this removal back to disk would make `undoDelete` unable to fully restore the
-   *   relationship if the delete is undone a moment later.
-   * - Empty target (note exists but has no body): a durable state, not a race with an
-   *   in-flight delete, so the relationship is actually stripped from the sender's
-   *   file, matching the ticket's "auto-delete the relationship from sender note".
+   * Drops rels to missing targets from each note in `candidates` (remembered in
+   * `danglingRefSources` so they can be restored if the target reappears).
+   * Returns each mutated note mapped to its rel targets *before* the repair.
    */
-  private async repairDanglingRelations(): Promise<void> {
-    await this.repairRelsOf(this.notes.keys())
-  }
-
-  /**
-   * Strips broken rels from each note in `candidates`: a missing target is dropped
-   * in memory only (and remembered in `danglingRefSources` so it can be restored
-   * if the target reappears); an existing but empty-bodied target is dropped from
-   * memory and from disk. Returns each mutated note mapped to its rel targets
-   * *before* the repair.
-   */
-  private async repairRelsOf(candidates: Iterable<string>): Promise<Map<string, string[]>> {
+  private repairRelsOf(candidates: Iterable<string>): Map<string, string[]> {
     const mutated = new Map<string, string[]>()
-    const writes: Promise<void>[] = []
 
     for (const filename of candidates) {
       const note = this.notes.get(filename)
@@ -1651,18 +1469,12 @@ export class NoteStore extends EventEmitter {
         continue
       }
 
-      let relationToEmptyTarget = false
       const kept = note.rels.filter((rel) => {
-        const target = this.notes.get(rel.target)
-        if (!target) {
-          this.recordDanglingSource(rel.target, filename)
-          return false
+        if (this.notes.has(rel.target)) {
+          return true
         }
-        if (this.isEmptyBody(target)) {
-          relationToEmptyTarget = true
-          return false
-        }
-        return true
+        this.recordDanglingSource(rel.target, filename)
+        return false
       })
 
       if (kept.length === note.rels.length) {
@@ -1674,12 +1486,8 @@ export class NoteStore extends EventEmitter {
         note.rels.map((rel) => rel.target)
       )
       note.rels = kept
-      if (relationToEmptyTarget) {
-        writes.push(this.persistRelations(filename, kept))
-      }
     }
 
-    await Promise.all(writes)
     return mutated
   }
 
@@ -1690,17 +1498,6 @@ export class NoteStore extends EventEmitter {
       this.danglingRefSources.set(missingTarget, sources)
     }
     sources.add(source)
-  }
-
-  private isEmptyBody(note: IndexedNote): boolean {
-    return note.body.trim().length === 0
-  }
-
-  private async persistRelations(filename: string, rels: NoteLink[]): Promise<void> {
-    await this.mutateRelations(filename, (raw) => {
-      raw.length = 0
-      raw.push(...rels.map((rel): NoteRelationTuple => [rel.label, rel.target]))
-    })
   }
 
   private createSearchIndex(): Document<SearchDocument> {
@@ -1724,7 +1521,7 @@ export class NoteStore extends EventEmitter {
   /** Counts weakly connected components; a degree-zero orphan is a one-node island. */
   private resetIndex(): void {
     this.notes.clear()
-    this.imagesByStem.clear()
+    this.mediaRefs.clear()
     this.reverseRefs.clear()
     this.searchIndex = this.createSearchIndex()
     this.status = 'empty'
@@ -1918,15 +1715,11 @@ export class NoteStore extends EventEmitter {
 
   /**
    * Whether a note is fit to be discovered as the *other end* of a relation - i.e.
-   * it actually exists and has content. `repairDanglingRelations` already strips
-   * empty-target relations from disk, and drops missing-target ones from this
-   * in-memory pass, so this is mostly a defensive backstop plus the one case that
-   * repair doesn't cover: an empty note that is itself the *source* of a relation
-   * into some other, perfectly valid note.
+   * it is indexed. `repairDanglingRelations` already drops missing-target
+   * relations, so this is a defensive backstop.
    */
   private isRenderableNode(filename: string): boolean {
-    const note = this.notes.get(filename)
-    return note !== undefined && !this.isEmptyBody(note)
+    return this.notes.has(filename)
   }
 
   /** Caps and registers a relation batch, bounded by the discovering pin's own maxDepth. */
@@ -2030,7 +1823,7 @@ export class NoteStore extends EventEmitter {
     // Every filename that reaches context.nodes is guaranteed to back a real note:
     // pin roots for missing notes are skipped in registerPinRoot, and neighbors are
     // only ever registered through buildOutgoingRelations/buildIncomingRelations,
-    // which filter out missing/empty targets via isRenderableNode before this runs.
+    // which filter out missing targets via isRenderableNode before this runs.
     const note = this.notes.get(filename)!
 
     return {
@@ -2040,12 +1833,7 @@ export class NoteStore extends EventEmitter {
       extraContent: note.extraContent,
       depth: meta.depth,
       degree: note.degree,
-      hiddenNeighbors: this.countHiddenNeighbors(note, shown),
-      notes: note.notes,
-      created: note.created,
-      updated: note.updated,
-      opened: note.opened,
-      relationshipsChanged: note.relationshipsChanged
+      hiddenNeighbors: this.countHiddenNeighbors(note, shown)
     }
   }
 
@@ -2116,220 +1904,125 @@ export class NoteStore extends EventEmitter {
     const slug = this.slugifyBody(body)
     let candidate: string
     do {
-      candidate = `${slug}-${randomBytes(3).toString('hex')}.json`
-    } while (this.notes.has(candidate))
+      candidate = noteFilename(`${slug}-${randomBytes(3).toString('hex')}`)
+    } while (this.notes.has(candidate) || existsSync(join(this.graphPath, candidate)))
     return candidate
   }
 
-  private async writeNoteFile(
-    filename: string,
-    data: { body: string; rels: NoteRelationTuple[] }
-  ): Promise<void> {
-    const payload: RawNoteFile = { body: data.body, rels: data.rels }
+  private async writeNote(filename: string, doc: ItemDocument): Promise<void> {
     const path = join(this.graphPath, filename)
     this.markSelfWrite(path)
-    await writeFile(path, JSON.stringify(payload, null, 2), 'utf8')
-  }
-
-  private async appendRelation(filename: string, relation: NoteRelationTuple): Promise<void> {
-    await this.mutateRelations(filename, (rels) => {
-      rels.push(relation)
-    })
-  }
-
-  private readTimestamp(value: unknown): string | null {
-    return typeof value === 'string' && value.trim().length > 0 ? value : null
+    await writeFile(path, serializeDocument(ITEM_SCHEMA, doc), 'utf8')
   }
 
   /**
-   * Writes `now` into each named lifecycle timestamp on an already-parsed note
-   * body. `created` is write-once - a note that already carries one keeps it.
-   * Operates on the parsed object so callers that are already inside a
-   * `mutateRawNote` pass can stamp without a second read-modify-write.
+   * Reads a note, applies `edit` to its parsed document and writes it back. Lines
+   * this app doesn't own (other keywords, state lines, ...) are kept as they were;
+   * an unchanged result isn't written, so the file's mtime stays meaningful.
    */
-  private applyTimestampStamp(
-    parsed: Record<string, unknown>,
-    fields: readonly NoteTimestampField[],
-    now: string
-  ): void {
-    for (const field of fields) {
-      if (field === 'created' && this.readTimestamp(parsed.created)) {
-        continue
-      }
-      parsed[field] = now
-    }
-  }
-
-  /** Stamps lifecycle timestamps onto one note file, preserving every other key (see mutateRawNote). */
-  private async stampTimestamps(
-    filename: string,
-    fields: readonly NoteTimestampField[],
-    now: string
-  ): Promise<void> {
-    await this.mutateRawNote(filename, (parsed) => this.applyTimestampStamp(parsed, fields, now))
-  }
-
-  /**
-   * Stamps `opened` on every note that is in `pins` but was not in the previous
-   * pin set - i.e. the notes the user just opened onto the graph. Restoring a
-   * persisted pin set on startup is not a fresh open, so it stamps nothing.
-   */
-  private async stampNewlyPinned(pins: PinSpec[]): Promise<void> {
-    const alreadyPinned = new Set(this.lastPins.map((pin) => pin.filename))
-    const freshlyPinned = pins
-      .map((pin) => pin.filename)
-      .filter((filename) => !alreadyPinned.has(filename) && this.notes.has(filename))
-    if (freshlyPinned.length === 0) {
-      return
-    }
-
-    // Best-effort: a failed timestamp write must never stop the graph from opening.
-    try {
-      const now = new Date().toISOString()
-      for (const filename of freshlyPinned) {
-        await this.stampTimestamps(filename, ['opened'], now)
-      }
-      await this.applyLocalChange({ upsert: freshlyPinned })
-    } catch (error) {
-      console.warn('Failed to stamp `opened` on newly pinned notes:', error)
-    }
-  }
-
-  /** Every note wired directly to `filename` by an outgoing or an incoming relation. */
-  private relationNeighbors(filename: string): string[] {
-    const neighbors = new Set<string>()
-    for (const rel of this.notes.get(filename)?.rels ?? []) {
-      neighbors.add(rel.target)
-    }
-    for (const incoming of this.reverseRefs.get(filename) ?? []) {
-      neighbors.add(incoming.source)
-    }
-    neighbors.delete(filename)
-    return [...neighbors]
-  }
-
-  /** Reads, mutates, and rewrites a note's raw JSON in place, without disturbing fields this app doesn't otherwise read/write. */
-  private async mutateRawNote(
-    filename: string,
-    mutate: (parsed: Record<string, unknown>) => void
-  ): Promise<void> {
+  private async mutateNote(filename: string, edit: (doc: ItemDocument) => void): Promise<void> {
     const path = join(this.graphPath, filename)
     const raw = await readFile(path, 'utf8')
-    const parsed = JSON.parse(raw) as Record<string, unknown>
-    mutate(parsed)
-    this.markSelfWrite(path)
-    await writeFile(path, JSON.stringify(parsed, null, 2), 'utf8')
-  }
+    const doc = parseDocument(ITEM_SCHEMA, raw)
+    if (errorsOf(doc).length > 0) {
+      throw new Error(`"${filename}" has syntax errors - fix it in a text editor first.`)
+    }
 
-  private async mutateRelations(
-    filename: string,
-    mutate: (rels: NoteRelationTuple[]) => void
-  ): Promise<void> {
-    await this.mutateRawNote(filename, (parsed) => {
-      const rels: NoteRelationTuple[] = Array.isArray(parsed.rels)
-        ? (parsed.rels as NoteRelationTuple[])
-        : []
-      mutate(rels)
-      parsed.rels = rels
-    })
+    edit(doc)
+    const next = serializeDocument(ITEM_SCHEMA, doc)
+    if (next === raw) {
+      return
+    }
+    this.markSelfWrite(path)
+    await writeFile(path, next, 'utf8')
   }
 
   private imagesDir(): string {
     return join(this.graphPath, IMAGES_DIR_NAME)
   }
 
-  private imageFilePath(filename: string): string {
-    return join(this.imagesDir(), filename)
-  }
-
-  /** Resolves an indexed media filename without allowing traversal outside images/. */
-  mediaFilePath(filename: string): string {
-    const parsed = this.parseImageName(filename)
-    if (
-      filename !== basename(filename) ||
-      !parsed ||
-      this.imagesByStem.get(parsed.stem) !== filename
-    ) {
+  /**
+   * Absolute path of a media path some indexed note references. Throws for any
+   * other path, so the renderer can't use it to read arbitrary files.
+   */
+  mediaFilePath(path: string): string {
+    if (!this.mediaRefs.has(path)) {
       throw new Error('Unknown media file.')
     }
-    return this.imageFilePath(filename)
+    return join(this.graphPath, path)
   }
 
-  /** `foo.json` -> `foo`. The stem an image filename must be prefixed with to belong to this note. */
-  private stemOf(noteFilename: string): string {
-    return noteFilename.replace(/\.json$/, '')
+  /** Moves one note's contribution to `mediaRefs` from `prev` to `next`. */
+  private trackMedia(prev: string | null, next: string | null): void {
+    if (prev === next) {
+      return
+    }
+    if (prev !== null) {
+      const count = (this.mediaRefs.get(prev) ?? 1) - 1
+      if (count > 0) {
+        this.mediaRefs.set(prev, count)
+      } else {
+        this.mediaRefs.delete(prev)
+      }
+    }
+    if (next !== null) {
+      this.mediaRefs.set(next, (this.mediaRefs.get(next) ?? 0) + 1)
+    }
   }
 
-  /** Lists `images/` (empty when the folder is absent). */
-  private async listImageDir(): Promise<string[]> {
+  /**
+   * Deletes a media file `owner` no longer points at - but only one this app
+   * manages (directly inside `images/`) and only when no other note still
+   * references it. Called before the index catches up with `owner`'s edit, so
+   * `owner`'s own reference is still counted.
+   */
+  private async releaseMedia(owner: string, path: string): Promise<void> {
+    const ownReference = this.notes.get(owner)?.image === path ? 1 : 0
+    if (isManagedMedia(path) && (this.mediaRefs.get(path) ?? 0) <= ownReference) {
+      await this.unlinkIfPresent(join(this.graphPath, path))
+    }
+  }
+
+  private async readMediaForUndo(path: string): Promise<PendingNoteImage | null> {
     try {
-      return await readdir(this.imagesDir())
+      return { path, data: await readFile(join(this.graphPath, path)) }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return null
+      }
+      throw error
+    }
+  }
+
+  private async unlinkIfPresent(path: string): Promise<void> {
+    try {
+      await unlink(path)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error
+      }
+    }
+  }
+
+  /** Paths of the media files in `images/` that no indexed note references. */
+  private async orphanedMediaFiles(): Promise<string[]> {
+    let entries: string[]
+    try {
+      entries = await readdir(this.imagesDir())
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return []
       }
       throw error
     }
-  }
 
-  /** Recognized media files not selected as the live attachment of any indexed note. */
-  private async orphanedMediaFiles(): Promise<string[]> {
-    const liveMedia = new Set(
-      [...this.notes.values()]
-        .map((note) => note.image)
-        .filter((filename): filename is string => filename !== null)
-    )
-
-    return (await this.listImageDir()).filter(
-      (entry) => this.parseImageName(entry) !== null && !liveMedia.has(entry)
-    )
-  }
-
-  /** `foo-1724900000000.webp` -> `{ stem: 'foo', ts: 1724900000000 }`, or null when it isn't a note's attached media. */
-  private parseImageName(entry: string): { stem: string; ts: number } | null {
-    const dot = entry.lastIndexOf('.')
-    if (dot <= 0 || !SUPPORTED_MEDIA_EXTENSIONS.has(entry.slice(dot + 1).toLowerCase())) {
-      return null
-    }
-    const stemMatch = IMAGE_STEM_PATTERN.exec(entry.slice(0, dot))
-    return stemMatch ? { stem: stemMatch[1], ts: Number(stemMatch[2]) } : null
-  }
-
-  /** Single scan of `images/` into `imagesByStem`, keeping the newest timestamp per stem. */
-  private async scanImages(): Promise<void> {
-    this.imagesByStem.clear()
-
-    const newestByStem = new Map<string, number>()
-    for (const entry of await this.listImageDir()) {
-      const parsed = this.parseImageName(entry)
-      if (!parsed) {
-        continue
-      }
-      const newest = newestByStem.get(parsed.stem)
-      if (newest === undefined || parsed.ts > newest) {
-        newestByStem.set(parsed.stem, parsed.ts)
-        this.imagesByStem.set(parsed.stem, entry)
-      }
-    }
-  }
-
-  /** Deletes every `images/<stem>-<digits><ext>` file (current image plus any stale leftovers). */
-  private async deleteImageFiles(stem: string): Promise<void> {
-    await Promise.all(
-      (await this.listImageDir())
-        .filter((entry) => this.parseImageName(entry)?.stem === stem)
-        .map(async (entry) => {
-          const path = this.imageFilePath(entry)
-          this.markSelfWrite(path)
-          try {
-            await unlink(path)
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-              throw error
-            }
-          }
-        })
-    )
+    return entries
+      .filter((entry) => {
+        const dot = entry.lastIndexOf('.')
+        return dot > 0 && SUPPORTED_MEDIA_EXTENSIONS.has(entry.slice(dot + 1).toLowerCase())
+      })
+      .map((entry) => `${IMAGES_DIR_NAME}/${entry}`)
+      .filter((path) => !this.mediaRefs.has(path))
   }
 
   private async persistSettings(): Promise<void> {
