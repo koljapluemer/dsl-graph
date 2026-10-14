@@ -7,10 +7,14 @@ import { parse } from 'yaml'
 
 export type Role = 'primary' | 'property' | 'modifier' | 'state'
 
-export type ValueType = 'date' | 'month' | 'weekday' | 'path'
+export type ValueType = 'date' | 'month' | 'weekday' | 'path' | 'text'
+
+/** `text` blocks are free text, `yaml` blocks a YAML mapping. */
+export type BlockKind = 'text' | 'yaml'
 
 const ROLES: readonly Role[] = ['primary', 'property', 'modifier', 'state']
-const VALUE_TYPES: readonly ValueType[] = ['date', 'month', 'weekday', 'path']
+const VALUE_TYPES: readonly ValueType[] = ['date', 'month', 'weekday', 'path', 'text']
+const BLOCK_KINDS: readonly BlockKind[] = ['text', 'yaml']
 
 /** One positional argument, or the value of an option. Any of `types` is accepted. */
 export interface ValueSpec {
@@ -24,6 +28,8 @@ export interface KeywordSpec {
   args: ValueSpec[]
   options: Map<string, ValueSpec>
   excludes: Set<string>
+  /** Set for keywords that hold a multi-line block (see language.md, "Block keywords"). */
+  block: BlockKind | null
 }
 
 export interface Schema {
@@ -62,6 +68,9 @@ function parseKeyword(name: string, raw: unknown): KeywordSpec {
   const args = Array.isArray(raw.args) ? raw.args : []
   const options = isRecord(raw.options) ? raw.options : {}
   const excludes = Array.isArray(raw.excludes) ? raw.excludes : []
+  if (raw.block !== undefined && !BLOCK_KINDS.includes(raw.block as BlockKind)) {
+    throw new Error(`Keyword "${name}" has an invalid block.`)
+  }
 
   return {
     name,
@@ -73,7 +82,8 @@ function parseKeyword(name: string, raw: unknown): KeywordSpec {
         { name: option, types: parseTypes(name, isRecord(spec) ? spec.type : undefined) }
       ])
     ),
-    excludes: new Set(excludes.map(String))
+    excludes: new Set(excludes.map(String)),
+    block: (raw.block as BlockKind | undefined) ?? null
   }
 }
 

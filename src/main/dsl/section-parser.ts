@@ -14,6 +14,23 @@ export class SectionParser {
 
   constructor(private readonly schema: Schema) {}
 
+  /**
+   * Registers a block keyword met in the section; false (with an error) when it
+   * already appeared.
+   */
+  claimBlock(keyword: string, lineNo: number): boolean {
+    if (this.seen.has(keyword)) {
+      this.error('duplicate_keyword', lineNo, keyword)
+      return false
+    }
+    this.seen.add(keyword)
+    return true
+  }
+
+  report(code: DiagnosticCode, line: number, detail: string): void {
+    this.error(code, line, detail)
+  }
+
   parseLine(rawLine: string, lineNo: number): void {
     const raw = rawLine.trim()
     if (!raw) {
@@ -77,7 +94,7 @@ export class SectionParser {
       return line
     }
 
-    const parsed = this.clause(tokens, 0, lineNo)
+    const parsed = this.clause(tokens, 0, lineNo, raw.slice(1, -1))
     if (parsed && parsed.next < tokens.length) {
       this.error('unexpected_token', lineNo, tokens[parsed.next].text)
       return line
@@ -107,12 +124,12 @@ export class SectionParser {
         this.diagnostics.push({ code: 'unknown_keyword', line: lineNo, detail: token.text })
         return { ...line, unknownTail: raw.slice(token.start) }
       }
-      if (spec.role === 'state') {
+      if (spec.role === 'state' || spec.block) {
         this.error('unexpected_token', lineNo, token.text)
         return line
       }
 
-      const parsed = this.clause(tokens, i, lineNo)
+      const parsed = this.clause(tokens, i, lineNo, raw)
       if (!parsed) {
         return line
       }
@@ -122,11 +139,16 @@ export class SectionParser {
     return line
   }
 
-  /** The clause whose keyword is `tokens[i]`, and the index after it; null (with an error reported) when it's malformed. */
+  /**
+   * The clause whose keyword is `tokens[i]`, and the index after it; null (with
+   * an error reported) when it's malformed. `source` is the string the tokens
+   * were cut from.
+   */
   private clause(
     tokens: Token[],
     i: number,
-    lineNo: number
+    lineNo: number,
+    source: string
   ): { clause: Clause; next: number } | null {
     const spec = this.spec(tokens[i].text)
     i++
@@ -138,6 +160,15 @@ export class SectionParser {
 
     const args: string[] = []
     for (const arg of spec.args) {
+      if (arg.types.length === 1 && arg.types[0] === 'text') {
+        if (i >= tokens.length) {
+          this.error('missing_arg', lineNo, spec.name)
+          return null
+        }
+        args.push(source.slice(tokens[i].start).trim())
+        i = tokens.length
+        continue
+      }
       if (i >= tokens.length || this.isKnownKeyword(tokens[i])) {
         this.error('missing_arg', lineNo, spec.name)
         return null

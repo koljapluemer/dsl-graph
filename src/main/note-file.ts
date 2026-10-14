@@ -44,7 +44,7 @@ export function readNoteContent(doc: Document): NoteContent {
 }
 
 export function newNoteDocument(body: string): Document {
-  return { body: textLines(body), section: [], extra: null, diagnostics: [] }
+  return { body: textLines(body), section: [], extra: null, data: null, diagnostics: [] }
 }
 
 export function setBody(doc: Document, body: string): void {

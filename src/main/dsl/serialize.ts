@@ -1,12 +1,13 @@
 import { trimBlankEnds, type Clause, type Document, type SectionLine } from './document'
-import { EXTRA_MARKER, isSectionOpener } from './openers'
+import { endsBlock, isSectionOpener } from './openers'
 import type { Schema } from './schema'
 import { formatToken } from './tokens'
 
 /**
  * Writes a document back as item text: body, a blank line, the section lines,
- * then the extra block. Section lines keep their `raw` text, so lines a writer
- * didn't touch come back exactly as they were read.
+ * then the `data` and `extra` blocks. Section lines keep their `raw` text, so
+ * lines a writer didn't touch come back exactly as they were read. Block lines
+ * that would end the block are indented.
  */
 export function serializeDocument(schema: Schema, doc: Document): string {
   const body = trimBlankEnds(doc.body)
@@ -17,15 +18,21 @@ export function serializeDocument(schema: Schema, doc: Document): string {
   const lines = body.map((line, index) =>
     index > 0 && isSectionOpener(schema, line) ? ` ${line}` : line
   )
-  const extra = doc.extra === null ? [] : trimBlankEnds(doc.extra)
+  const blocks = [
+    { keyword: 'data', content: doc.data },
+    { keyword: 'extra', content: doc.extra }
+  ].flatMap(({ keyword, content }) => {
+    const trimmed = content === null ? [] : trimBlankEnds(content)
+    return trimmed.length > 0
+      ? [keyword, ...trimmed.map((line) => (endsBlock(schema, line) ? ` ${line}` : line))]
+      : []
+  })
 
-  if (doc.section.length > 0 || extra.length > 0) {
+  if (doc.section.length > 0 || blocks.length > 0) {
     lines.push('')
   }
   lines.push(...doc.section.map((line) => line.raw))
-  if (extra.length > 0) {
-    lines.push(EXTRA_MARKER, ...extra)
-  }
+  lines.push(...blocks)
   return `${lines.join('\n')}\n`
 }
 

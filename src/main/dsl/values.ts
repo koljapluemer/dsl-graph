@@ -20,6 +20,8 @@ function matches(text: string, type: ValueType): boolean {
       return WEEKDAYS.has(text)
     case 'path':
       return isPath(text)
+    case 'text':
+      return text.length > 0
   }
 }
 

@@ -22,10 +22,11 @@ What graphirst reads and writes:
 | body | The note's text, shown on the graph node. Never empty. |
 | `-> label @target` | An outgoing relationship. `target` is the other note's filename without `.txt`. A missing label is shown as `related`. |
 | `media <path>` | The attached image or video, relative to the graph folder (see [media-attachments.md](./media-attachments.md)). |
-| `extra` | Long-form content, from the `extra` line to the end of the file. |
+| `extra` | Long-form content, from the `extra` line to the next keyword, relationship or state line, or the end of the file. Lines in it that would end it are indented when graphirst rewrites the file. |
 
 Every other line (calendar keywords, unknown keywords, `( … )` state lines)
-is kept as it is when graphirst rewrites a file. The keyword schema is
+and the `data` block are kept as they are when graphirst rewrites a file; a
+rewrite writes the section lines first, then `data`, then `extra`. The keyword schema is
 vendored at `spec/keywords.yaml`; refresh it with `just sync-spec`.
 
 ## Identity

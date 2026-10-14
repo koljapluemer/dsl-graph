@@ -9,12 +9,14 @@
 #   args:     positional arguments, all required: {name, type}
 #   options:  named optional sub-keywords, each followed by one value:
 #             {<option>: {type, meaning}}
+#   block:    text | yaml — the keyword holds a multi-line block (see
+#                        language.md, "Block keywords"); takes no args
 #   excludes: keywords that may not appear in the same item (declare on both)
 #   meaning:  what the keyword does — the part frontends must agree on
 #
 # A type is one name from language.md, or a list of them.
 
-version: 2
+version: 4
 
 changes:
   - version: 1
@@ -25,13 +27,22 @@ changes:
       primary keyword is no longer required; relationship lines, state lines
       and the extra block are added to the syntax; new roles property and
       state; new value type path; media.
+  - version: 3
+    note: >
+      New value type text (rest of the line); new property tasks.
+  - version: 4
+    note: >
+      Breaking: `extra` is a block keyword and ends at the next keyword,
+      relationship or state line instead of the end of the file. New block
+      keyword `data` (YAML); new primary source; new errors empty_data and
+      invalid_yaml.
 
 keywords:
   appointment:
     role: primary
     args:
       - { name: date, type: date }
-    excludes: [recurring]
+    excludes: [recurring, source]
     meaning: The item falls on `date` only.
 
   recurring:
@@ -44,7 +55,7 @@ keywords:
         meaning: >
           Last day on which the item falls, inclusive. A `month` means that
           month's last day.
-    excludes: [appointment]
+    excludes: [appointment, source]
     meaning: >
       The item falls on every `weekday`, with no start bound, up to and
       including `until` when given.
@@ -56,3 +67,30 @@ keywords:
     meaning: >
       The item's attached image or video. The file extension decides which:
       jpg jpeg png gif webp bmp are images, mp4 webm mov are videos.
+
+  tasks:
+    role: property
+    args:
+      - { name: text, type: text }
+    meaning: >
+      A meta-annotation about the note itself, e.g. to clean it up or to fix
+      problems. Not part of the note's content; non-empty, rest of the line.
+
+  source:
+    role: primary
+    meaning: >
+      The item is a bibliographic source. Its fields (`entrytype`, `author`,
+      `date`, `url`, …) are the mapping in its `data` block.
+    excludes: [appointment, recurring]
+
+  data:
+    role: property
+    block: yaml
+    meaning: >
+      Structured data about the item, as a YAML mapping. What the keys mean
+      depends on the item's primary keyword.
+
+  extra:
+    role: property
+    block: text
+    meaning: Long-form free text about the item, kept verbatim.

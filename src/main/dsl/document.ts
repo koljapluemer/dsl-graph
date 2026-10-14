@@ -1,5 +1,6 @@
-import { isExtraMarker, isSectionOpener, EXTRA_MARKER } from './openers'
-import type { Schema } from './schema'
+import { parse } from 'yaml'
+import { blockKeyword, endsBlock, isSectionOpener } from './openers'
+import type { BlockKind, Schema } from './schema'
 import { SectionParser } from './section-parser'
 
 /** One `keyword arg* (option value)*` clause; values as their token text. */
@@ -36,6 +37,8 @@ export type DiagnosticCode =
   | 'invalid_relation'
   | 'invalid_state'
   | 'empty_extra'
+  | 'empty_data'
+  | 'invalid_yaml'
   | 'unknown_keyword'
 
 export interface Diagnostic {
@@ -50,8 +53,10 @@ export interface Document {
   /** Verbatim body lines; empty only for an empty file. */
   body: string[]
   section: SectionLine[]
-  /** Verbatim extra lines, or null when the file has no extra marker. */
+  /** Verbatim `extra` block lines, or null when the file has none. */
   extra: string[] | null
+  /** Verbatim `data` block lines (a YAML mapping), or null when the file has none. */
+  data: string[] | null
   diagnostics: Diagnostic[]
 }
 
@@ -96,32 +101,61 @@ export function parseDocument(schema: Schema, text: string): Document {
       body: [],
       section: [],
       extra: null,
+      data: null,
       diagnostics: [{ code: 'empty', line: null, detail: null }]
     }
   }
 
   const boundary = findIndexFrom(lines, first + 1, (line) => isSectionOpener(schema, line))
-  const marker = findIndexFrom(lines, boundary, isExtraMarker)
 
   const parser = new SectionParser(schema)
-  for (let i = boundary; i < marker; i++) {
-    parser.parseLine(lines[i], i + 1)
+  const blocks = new Map<string, string[]>()
+  for (let i = boundary; i < lines.length; ) {
+    const keyword = blockKeyword(schema, lines[i])
+    if (keyword === null) {
+      parser.parseLine(lines[i], i + 1)
+      i++
+      continue
+    }
+    const end = findIndexFrom(lines, i + 1, (line) => endsBlock(schema, line))
+    if (parser.claimBlock(keyword, i + 1)) {
+      const content = trimBlankEnds(lines.slice(i + 1, end))
+      blocks.set(keyword, content)
+      checkBlock(parser, schema.keywords.get(keyword)!.block!, keyword, content, i + 1)
+    }
+    i = end
   }
   parser.checkExcludes()
-
-  let extra: string[] | null = null
-  if (marker < lines.length) {
-    extra = trimBlankEnds(lines.slice(marker + 1))
-    if (extra.length === 0) {
-      parser.diagnostics.push({ code: 'empty_extra', line: marker + 1, detail: EXTRA_MARKER })
-    }
-  }
 
   return {
     body: trimBlankEnds(lines.slice(first, boundary)),
     section: parser.lines,
-    extra,
+    extra: blocks.get('extra') ?? null,
+    data: blocks.get('data') ?? null,
     diagnostics: parser.diagnostics
+  }
+}
+
+function checkBlock(
+  parser: SectionParser,
+  kind: BlockKind,
+  keyword: string,
+  content: string[],
+  lineNo: number
+): void {
+  if (content.length === 0) {
+    parser.report(kind === 'yaml' ? 'empty_data' : 'empty_extra', lineNo, keyword)
+  } else if (kind === 'yaml' && !isYamlMapping(content.join('\n'))) {
+    parser.report('invalid_yaml', lineNo, keyword)
+  }
+}
+
+function isYamlMapping(text: string): boolean {
+  try {
+    const value: unknown = parse(text)
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+  } catch {
+    return false
   }
 }
 

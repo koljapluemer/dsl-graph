@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { parse } from 'yaml'
 import {
   clausesOf,
   isWarning,
@@ -41,6 +42,7 @@ function resultJson(doc: Document): Record<string, unknown> {
     state: stateOf(doc).map(clauseJson),
     unknown: unknownOf(doc),
     extra: doc.extra === null ? null : doc.extra.join('\n'),
+    data: doc.data === null ? null : parse(doc.data.join('\n')),
     errors: diagnosticsJson(doc.diagnostics.filter((diagnostic) => !isWarning(diagnostic))),
     warnings: diagnosticsJson(doc.diagnostics.filter(isWarning))
   }
