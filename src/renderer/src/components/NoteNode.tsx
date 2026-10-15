@@ -14,10 +14,6 @@ export type NoteNodeData =
       isAnchor: boolean
       onDelete: (filename: string, pinDepth: number | null) => Promise<void>
       onEdit: (filename: string) => void
-      onUpdateExtra: (
-        filename: string,
-        patch: { body: string; extraContent: string }
-      ) => Promise<void>
       onPin: (filename: string) => void
       onUnpin: (filename: string) => void
       onChangeDepth: (filename: string, nextDepth: number) => void
@@ -31,9 +27,10 @@ export type NoteNodeData =
     }
   | {
       kind: 'edit'
-      initialBody: string
+      /** The note file's full text. */
+      initialText: string
       initialImage: string | null
-      onSave: (body: string, image: ImageState) => Promise<void>
+      onSave: (text: string, image: ImageState) => Promise<void>
       onCancel: () => void
     }
 
@@ -95,7 +92,6 @@ function NoteNode({ data }: NodeProps<NoteFlowNode>): React.JSX.Element {
           isAnchor={data.isAnchor}
           onDelete={data.onDelete}
           onEdit={data.onEdit}
-          onUpdateExtra={data.onUpdateExtra}
           onPin={data.onPin}
           onUnpin={data.onUnpin}
           onChangeDepth={data.onChangeDepth}
@@ -103,7 +99,7 @@ function NoteNode({ data }: NodeProps<NoteFlowNode>): React.JSX.Element {
       ) : data.kind === 'edit' ? (
         <DraftNoteCard
           mode="edit"
-          initialBody={data.initialBody}
+          initialText={data.initialText}
           initialImage={data.initialImage}
           showRelation={false}
           onSave={(body, _label, _reverse, image) => data.onSave(body, image)}

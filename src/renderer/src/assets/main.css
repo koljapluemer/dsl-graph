@@ -19,3 +19,27 @@
 .note-textarea {
   field-sizing: content;
 }
+
+/* The raw note editor (CodeMirror) and its item-language tokens - class names
+   from shared/dsl/highlight's span kinds, colours matching dsl-crud's. */
+.raw-note-editor .cm-editor {
+  min-height: 9rem;
+  max-height: 32rem;
+}
+.raw-note-editor .cm-editor.cm-focused {
+  outline: none;
+}
+.raw-note-editor .cm-scroller {
+  font-family: var(--font-mono);
+  line-height: 1.5;
+}
+.tok-primary { color: var(--color-primary); font-weight: 600; }
+.tok-property, .tok-relation, .tok-blockMarker { color: var(--color-accent); font-weight: 600; }
+.tok-modifier, .tok-state { color: var(--color-secondary); font-weight: 600; }
+.tok-option { color: var(--color-accent); }
+.tok-value, .tok-target { color: var(--color-info); }
+.tok-tag { color: var(--color-success); }
+.tok-block { color: color-mix(in oklab, var(--color-base-content) 70%, transparent); }
+.tok-unknown { color: color-mix(in oklab, var(--color-base-content) 50%, transparent); font-style: italic; }
+.tok-error-line { text-decoration: underline wavy var(--color-error); }
+.tok-warning-line { text-decoration: underline wavy var(--color-warning); }

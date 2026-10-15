@@ -4,6 +4,7 @@ import type { Token } from './tokens'
 const WEEKDAYS = new Set(['mo', 'tu', 'we', 'th', 'fr', 'sa', 'su'])
 const DATE = /^(\d{2})-(\d{2})-(\d{2})$/
 const MONTH = /^(\d{2})-(\d{2})$/
+const TAG = /^[a-z0-9-]+$/
 
 /** Whether the token is a value of any of `types`. Only a `path` may be quoted. */
 export function matchesValueType(token: Token, types: readonly ValueType[]): boolean {
@@ -22,7 +23,14 @@ function matches(text: string, type: ValueType): boolean {
       return isPath(text)
     case 'text':
       return text.length > 0
+    case 'tags':
+      return isTag(text)
   }
+}
+
+/** One tag of a `tags` value: `a-z`, `0-9` and `-`. */
+export function isTag(text: string): boolean {
+  return TAG.test(text)
 }
 
 /** `yy-mm-dd`, year 20yy, only when it's a real calendar date. */

@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import { Document } from 'flexsearch'
 import { RE2 } from 're2-wasm'
+import { EMPTY_BLACKLIST, hides, parseBlacklist } from './blacklist'
 import { GraphWatcher, type GraphChangeBatch } from './graph-watcher'
 import {
   IMAGES_DIR_NAME,
@@ -15,9 +16,9 @@ import {
   SUPPORTED_VIDEO_EXTENSIONS
 } from './graph-fs'
 import { MAX_VIDEO_ATTACHMENT_BYTES } from '../shared/media'
-import { errorsOf, parseDocument, type Document as ItemDocument } from './dsl/document'
-import { ITEM_SCHEMA } from './dsl/item-schema'
-import { serializeDocument } from './dsl/serialize'
+import { errorsOf, parseDocument, type Document as ItemDocument } from '../shared/dsl/document'
+import { ITEM_SCHEMA } from '../shared/dsl/item-schema'
+import { serializeDocument } from '../shared/dsl/serialize'
 import {
   UNLABELED_RELATION,
   addRelation,
@@ -27,8 +28,6 @@ import {
   readNoteContent,
   relabelRelation,
   removeRelation,
-  setBody,
-  setExtra,
   setMedia
 } from './note-file'
 import { selectRecentNotes } from './recent-notes'
@@ -43,6 +42,8 @@ import { matchesOrphanFilter, orderByHeadScore } from './search-ordering'
 import type {
   AttachImageRequest,
   AttachImageResponse,
+  Blacklist,
+  BlacklistOptions,
   ClearImageRequest,
   ConnectNotesRequest,
   ConnectNotesResponse,
@@ -105,6 +106,14 @@ const INCREMENTAL_BATCH_LIMIT = 50
 interface StoredSettings {
   graphPath?: string
   pins?: PinSpec[]
+  blacklist?: Blacklist
+}
+
+/** A note file that parsed without errors, with what the blacklist judges it by. */
+interface ReadNote {
+  note: IndexedNote
+  type: string | null
+  tags: string[]
 }
 
 interface FuzzyCandidate {
@@ -224,6 +233,15 @@ export class NoteStore extends EventEmitter {
   private graphPath = ''
   private lastPins: PinSpec[] = []
   private notes = new Map<string, IndexedNote>()
+  private blacklist: Blacklist = EMPTY_BLACKLIST
+  /** Type and tags of every note that parsed, hidden ones included, for the blacklist settings. */
+  private facets = new Map<string, Pick<ReadNote, 'type' | 'tags'>>()
+  /**
+   * The media path of each note the blacklist hides. Hidden notes are left out of
+   * every index, but their media still counts in `mediaRefs`, so it is never
+   * offered for deletion as orphaned.
+   */
+  private hiddenMedia = new Map<string, string | null>()
   /** Media path -> how many indexed notes reference it, kept in step with `notes`. */
   private mediaRefs = new Map<string, number>()
   private reverseRefs = new Map<string, IncomingRelation[]>()
@@ -666,6 +684,19 @@ export class NoteStore extends EventEmitter {
     return { deletedCount: orphanedFiles.length }
   }
 
+  async getNoteText(filename: string): Promise<string> {
+    await this.ensureIndexed()
+
+    if (!this.notes.has(filename)) {
+      throw new Error(`Could not find "${filename}" in ${this.graphPath}.`)
+    }
+    return readFile(join(this.graphPath, filename), 'utf8')
+  }
+
+  /**
+   * Writes the note's full text as given (plus a final newline). Refused when it
+   * has syntax errors: the index skips such files, so the note would vanish.
+   */
   async updateNote(request: UpdateNoteRequest): Promise<void> {
     await this.ensureIndexed()
 
@@ -673,12 +704,47 @@ export class NoteStore extends EventEmitter {
       throw new Error(`Could not find "${request.filename}" in ${this.graphPath}.`)
     }
 
-    await this.mutateNote(request.filename, (doc) => {
-      setBody(doc, request.body)
-      setExtra(doc, request.extraContent)
-    })
+    const errors = errorsOf(parseDocument(ITEM_SCHEMA, request.text))
+    if (errors.length > 0) {
+      const list = errors
+        .map((error) => (error.line === null ? error.code : `${error.code} (line ${error.line})`))
+        .join(', ')
+      throw new Error(`Not saved - fix these first: ${list}.`)
+    }
+
+    const path = join(this.graphPath, request.filename)
+    const next = request.text.endsWith('\n') ? request.text : `${request.text}\n`
+    if (next !== (await readFile(path, 'utf8'))) {
+      this.markSelfWrite(path)
+      await writeFile(path, next, 'utf8')
+    }
 
     await this.applyLocalChange({ upsert: [request.filename] })
+  }
+
+  async getBlacklistOptions(): Promise<BlacklistOptions> {
+    await this.ensureIndexed()
+
+    const types = new Set<string>()
+    const tags = new Set<string>()
+    for (const facet of this.facets.values()) {
+      if (facet.type !== null) {
+        types.add(facet.type)
+      }
+      facet.tags.forEach((tag) => tags.add(tag))
+    }
+    return { blacklist: this.blacklist, knownTypes: [...types].sort(), knownTags: [...tags].sort() }
+  }
+
+  async setBlacklist(blacklist: Blacklist): Promise<void> {
+    this.blacklist = parseBlacklist(blacklist)
+    await this.persistSettings()
+    // A rebuild already running may have judged some notes by the old blacklist:
+    // let it finish, then rebuild with this one.
+    while (this.inFlightIndex) {
+      await this.inFlightIndex
+    }
+    await this.ensureIndexed(true)
   }
 
   /**
@@ -867,6 +933,8 @@ export class NoteStore extends EventEmitter {
         this.graphPath = parsed.graphPath
       }
 
+      this.blacklist = parseBlacklist(parsed.blacklist)
+
       if (Array.isArray(parsed.pins)) {
         this.lastPins = parsed.pins.filter(
           (pin): pin is PinSpec =>
@@ -967,13 +1035,20 @@ export class NoteStore extends EventEmitter {
       const batch = dirEntries.slice(batchStart, batchStart + batchSize)
       const parsedNotes = await Promise.all(batch.map((filename) => this.readNoteFile(filename)))
 
-      for (const note of parsedNotes) {
-        if (!note) {
+      for (const read of parsedNotes) {
+        if (!read) {
+          continue
+        }
+
+        const { note } = read
+        this.facets.set(note.filename, { type: read.type, tags: read.tags })
+        this.trackMedia(null, note.image)
+        if (hides(this.blacklist, read.type, read.tags)) {
+          this.hiddenMedia.set(note.filename, note.image)
           continue
         }
 
         this.notes.set(note.filename, note)
-        this.trackMedia(null, note.image)
 
         const doc: SearchDocument = {
           id: note.filename,
@@ -1108,6 +1183,8 @@ export class NoteStore extends EventEmitter {
     }
 
     for (const filename of change.remove) {
+      this.forgetHidden(filename)
+      this.facets.delete(filename)
       const prev = this.unindexNote(filename, delta)
       relSources.add(filename)
       affected.add(filename)
@@ -1188,22 +1265,35 @@ export class NoteStore extends EventEmitter {
 
   /**
    * Reads one note file and folds it into `this.notes`, the FlexSearch index and
-   * the raw-search corpus. A file that no longer reads is treated as a removal.
+   * the raw-search corpus. A file that no longer reads, or that the blacklist
+   * now hides, is treated as a removal.
    */
   private async indexNote(
     filename: string,
     delta: WorkerDelta
   ): Promise<{ prev: IndexedNote | null; next: IndexedNote | null }> {
     const prev = this.notes.get(filename) ?? null
-    const next = await this.readNoteFile(filename)
+    const read = await this.readNoteFile(filename)
 
-    if (!next) {
+    this.forgetHidden(filename)
+    if (read) {
+      this.facets.set(filename, { type: read.type, tags: read.tags })
+    } else {
+      this.facets.delete(filename)
+    }
+
+    if (!read || hides(this.blacklist, read.type, read.tags)) {
       if (prev) {
         this.unindexNote(filename, delta)
+      }
+      if (read) {
+        this.hiddenMedia.set(filename, read.note.image)
+        this.trackMedia(null, read.note.image)
       }
       return { prev, next: null }
     }
 
+    const next = read.note
     this.notes.set(filename, next)
     this.trackMedia(prev?.image ?? null, next.image)
 
@@ -1237,6 +1327,14 @@ export class NoteStore extends EventEmitter {
     this.removeFromRawCorpus(filename)
     delta.removals.push(filename)
     return prev
+  }
+
+  /** Drops a hidden note's media reference; no-op for a note that isn't hidden. */
+  private forgetHidden(filename: string): void {
+    if (this.hiddenMedia.has(filename)) {
+      this.trackMedia(this.hiddenMedia.get(filename) ?? null, null)
+      this.hiddenMedia.delete(filename)
+    }
   }
 
   /** Rewrites one source note's entries in `reverseRefs`: drop it from every prior target, re-add it to every current one. */
@@ -1414,7 +1512,7 @@ export class NoteStore extends EventEmitter {
   }
 
   /** Reads and parses one note file; null (with a console warning) when it is unreadable or has syntax errors. */
-  private async readNoteFile(filename: string): Promise<IndexedNote | null> {
+  private async readNoteFile(filename: string): Promise<ReadNote | null> {
     const path = join(this.graphPath, filename)
     try {
       const [raw, info] = await Promise.all([readFile(path, 'utf8'), stat(path)])
@@ -1426,7 +1524,7 @@ export class NoteStore extends EventEmitter {
       }
 
       const content = readNoteContent(doc)
-      return {
+      const note: IndexedNote = {
         filename,
         body: content.body,
         bodyCompact: content.body.replace(/\s+/g, ' ').trim(),
@@ -1435,8 +1533,11 @@ export class NoteStore extends EventEmitter {
         image: content.media,
         extraContent: content.extraContent,
         extraCompact: content.extraContent.replace(/\s+/g, ' ').trim(),
+        sectionLines: content.sectionLines,
+        dataText: content.dataText,
         mtimeMs: info.mtimeMs
       }
+      return { note, type: content.type, tags: content.tags }
     } catch (error) {
       console.warn(`Skipping unreadable note ${filename}:`, error)
       return null
@@ -1521,6 +1622,8 @@ export class NoteStore extends EventEmitter {
   /** Counts weakly connected components; a degree-zero orphan is a one-node island. */
   private resetIndex(): void {
     this.notes.clear()
+    this.facets.clear()
+    this.hiddenMedia.clear()
     this.mediaRefs.clear()
     this.reverseRefs.clear()
     this.searchIndex = this.createSearchIndex()
@@ -1831,6 +1934,8 @@ export class NoteStore extends EventEmitter {
       body: note.body,
       image: note.image,
       extraContent: note.extraContent,
+      sectionLines: note.sectionLines,
+      dataText: note.dataText,
       depth: meta.depth,
       degree: note.degree,
       hiddenNeighbors: this.countHiddenNeighbors(note, shown)
@@ -2033,7 +2138,8 @@ export class NoteStore extends EventEmitter {
       JSON.stringify(
         {
           graphPath: this.graphPath,
-          pins: this.lastPins
+          pins: this.lastPins,
+          blacklist: this.blacklist
         } satisfies StoredSettings,
         null,
         2

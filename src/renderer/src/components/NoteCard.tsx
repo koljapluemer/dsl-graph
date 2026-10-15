@@ -1,10 +1,8 @@
-import { ExternalLink, FileText, GripVertical, Maximize2, Pencil, Trash2 } from 'lucide-react'
+import { GripVertical, Maximize2, Pencil, Trash2 } from 'lucide-react'
 import { memo, useState } from 'react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import ExtraContentModal from './ExtraContentModal'
 import MediaPreview from './MediaPreview'
 import MediaModal from './MediaModal'
+import NoteMarkdown from './NoteMarkdown'
 import PinControl from './PinControl'
 import { mediaUrl } from '../lib/media'
 import { isVideoFilename } from '../../../shared/media'
@@ -16,7 +14,6 @@ function NoteCard({
   isAnchor,
   onDelete,
   onEdit,
-  onUpdateExtra,
   onPin,
   onUnpin,
   onChangeDepth
@@ -26,14 +23,12 @@ function NoteCard({
   isAnchor: boolean
   onDelete: (filename: string, pinDepth: number | null) => Promise<void>
   onEdit: (filename: string) => void
-  onUpdateExtra: (filename: string, patch: { body: string; extraContent: string }) => Promise<void>
   onPin: (filename: string) => void
   onUnpin: (filename: string) => void
   onChangeDepth: (filename: string, nextDepth: number) => void
 }): React.JSX.Element {
   const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [extraModalOpen, setExtraModalOpen] = useState(false)
   const [mediaModalOpen, setMediaModalOpen] = useState(false)
   const hasExtra = note.extraContent.trim().length > 0
 
@@ -108,17 +103,6 @@ function NoteCard({
           </button>
           <button
             type="button"
-            className={`btn btn-ghost btn-xs rounded-full ${hasExtra ? 'text-primary' : ''}`}
-            onClick={(event) => {
-              event.stopPropagation()
-              setExtraModalOpen(true)
-            }}
-            title={hasExtra ? 'Edit extra content' : 'Add extra content'}
-          >
-            <FileText className="size-3.5" />
-          </button>
-          <button
-            type="button"
             className="btn btn-ghost btn-xs rounded-full hover:bg-error/10 hover:text-error disabled:opacity-50"
             onClick={(event) => {
               event.stopPropagation()
@@ -142,49 +126,32 @@ function NoteCard({
         />
       ) : null}
 
-      <div
-        className={[
-          'prose prose-sm max-w-none',
-          'prose-code:before:content-none prose-code:after:content-none',
-          // Blockquotes: keep the accent bar + a subtle fill, drop the plugin's
-          // bold + italic styling and the auto-inserted curly quote marks.
-          'prose-blockquote:font-normal prose-blockquote:not-italic',
-          'prose-blockquote: prose-blockquote:bg-base-200/60 prose-blockquote:py-2 prose-blockquote:pr-4',
-          '[&_blockquote_p:first-of-type::before]:content-none',
-          '[&_blockquote_p:last-of-type::after]:content-none'
-        ].join(' ')}
-      >
-        {note.body.trim() ? (
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            components={{
-              a: ({ href, children }) => (
-                <a
-                  href={href}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1"
-                >
-                  {children}
-                  <ExternalLink className="size-3" />
-                </a>
-              )
-            }}
-          >
-            {note.body}
-          </ReactMarkdown>
-        ) : (
-          <p className="italic text-base-content/50">Empty note</p>
-        )}
-      </div>
+      {/*
+        The note's full content: body, then the keyword lines worth reading and the
+        data block, then the extra content a size down. Media is the preview above;
+        relationships are the edges; tags and state lines are left out.
+      */}
+      {note.body.trim() ? (
+        <NoteMarkdown markdown={note.body} />
+      ) : (
+        <p className="text-sm italic text-base-content/50">Empty note</p>
+      )}
 
-      {extraModalOpen ? (
-        <ExtraContentModal
-          value={note.extraContent}
-          onSave={(extraContent) => onUpdateExtra(note.filename, { body: note.body, extraContent })}
-          onClose={() => setExtraModalOpen(false)}
-        />
+      {note.sectionLines.length > 0 || note.dataText !== null ? (
+        <div className="mt-3 space-y-1 font-mono text-xs break-words whitespace-pre-wrap text-base-content/60">
+          {note.sectionLines.map((line, index) => (
+            <p key={index}>{line}</p>
+          ))}
+          {note.dataText !== null ? <p>{note.dataText}</p> : null}
+        </div>
       ) : null}
+
+      {hasExtra ? (
+        <div className="mt-3 border-t border-base-300 pt-3 text-base-content/80">
+          <NoteMarkdown markdown={note.extraContent} small />
+        </div>
+      ) : null}
+
       {mediaModalOpen && note.image ? (
         <MediaModal
           filename={note.image}

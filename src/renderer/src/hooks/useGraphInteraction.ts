@@ -201,9 +201,13 @@ export function useGraphInteraction({
     [onUnpinNote, onPinNote, showUndo]
   )
 
+  // Edit mode works on the file's full text, read fresh from disk.
   const handleStartEdit = useCallback(
     (filename: string) => {
-      setInteraction({ type: 'edit', filename })
+      void window.api.notes.getNoteText(filename).then(
+        (text) => setInteraction({ type: 'edit', filename, text }),
+        (error: Error) => console.error(`Could not open ${filename} for editing:`, error)
+      )
     },
     [setInteraction]
   )
@@ -211,15 +215,14 @@ export function useGraphInteraction({
   const handleSaveEdit = useCallback(
     async (
       filename: string,
-      body: string,
+      text: string,
       image: ImageState,
-      previousImage: string | null,
-      extraContent: string
+      previousImage: string | null
     ): Promise<void> => {
-      await window.api.notes.updateNote({ filename, body, extraContent })
+      await window.api.notes.updateNote({ filename, text })
 
       // Media has its own endpoints (they write the file and the note's `media`
-      // line), so it reconciles separately from the note body.
+      // line), so it reconciles separately from the note text.
       if (image?.status === 'new') {
         await window.api.notes.attachImage({ filename, dataUrl: image.dataUrl })
       } else if (image === null && previousImage !== null) {
@@ -230,15 +233,6 @@ export function useGraphInteraction({
       setInteraction(IDLE_INTERACTION)
     },
     [markInteraction, setInteraction]
-  )
-
-  // Extra-content edits don't change body or image, so unlike handleSaveEdit
-  // this never touches layout - no markInteraction/anchor promotion needed.
-  const handleUpdateExtra = useCallback(
-    async (filename: string, patch: { body: string; extraContent: string }): Promise<void> => {
-      await window.api.notes.updateNote({ filename, ...patch })
-    },
-    []
   )
 
   const handleConfirmConnection = useCallback(
@@ -314,7 +308,6 @@ export function useGraphInteraction({
       onDeleteNote: handleDeleteNote,
       onStartEdit: handleStartEdit,
       onSaveEdit: handleSaveEdit,
-      onUpdateExtra: handleUpdateExtra,
       onSaveDraft: handleSaveDraft,
       onCancelInteraction: cancelInteraction,
       onConfirmConnection: handleConfirmConnection,
@@ -328,7 +321,6 @@ export function useGraphInteraction({
       handleDeleteNote,
       handleStartEdit,
       handleSaveEdit,
-      handleUpdateExtra,
       handleSaveDraft,
       cancelInteraction,
       handleConfirmConnection,

@@ -11,12 +11,14 @@
 #             {<option>: {type, meaning}}
 #   block:    text | yaml — the keyword holds a multi-line block (see
 #                        language.md, "Block keywords"); takes no args
+#   line_start: true — the keyword must be the first token of its line (see
+#                        language.md, "Keyword section")
 #   excludes: keywords that may not appear in the same item (declare on both)
 #   meaning:  what the keyword does — the part frontends must agree on
 #
 # A type is one name from language.md, or a list of them.
 
-version: 4
+version: 5
 
 changes:
   - version: 1
@@ -36,6 +38,10 @@ changes:
       relationship or state line instead of the end of the file. New block
       keyword `data` (YAML); new primary source; new errors empty_data and
       invalid_yaml.
+  - version: 5
+    note: >
+      New value type tags (rest of the line, one or more lowercase tags); new
+      keyword field line_start; new property tags.
 
 keywords:
   appointment:
@@ -75,6 +81,16 @@ keywords:
     meaning: >
       A meta-annotation about the note itself, e.g. to clean it up or to fix
       problems. Not part of the note's content; non-empty, rest of the line.
+
+  tags:
+    role: property
+    line_start: true
+    args:
+      - { name: tags, type: tags }
+    meaning: >
+      Labels for the item, e.g. to group it or to let a frontend hide it. Each
+      tag is lowercase letters, digits and dashes. Their order and repetitions
+      carry no meaning.
 
   source:
     role: primary

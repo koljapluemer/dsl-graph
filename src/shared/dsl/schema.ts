@@ -7,13 +7,13 @@ import { parse } from 'yaml'
 
 export type Role = 'primary' | 'property' | 'modifier' | 'state'
 
-export type ValueType = 'date' | 'month' | 'weekday' | 'path' | 'text'
+export type ValueType = 'date' | 'month' | 'weekday' | 'path' | 'text' | 'tags'
 
 /** `text` blocks are free text, `yaml` blocks a YAML mapping. */
 export type BlockKind = 'text' | 'yaml'
 
 const ROLES: readonly Role[] = ['primary', 'property', 'modifier', 'state']
-const VALUE_TYPES: readonly ValueType[] = ['date', 'month', 'weekday', 'path', 'text']
+const VALUE_TYPES: readonly ValueType[] = ['date', 'month', 'weekday', 'path', 'text', 'tags']
 const BLOCK_KINDS: readonly BlockKind[] = ['text', 'yaml']
 
 /** One positional argument, or the value of an option. Any of `types` is accepted. */
@@ -30,6 +30,8 @@ export interface KeywordSpec {
   excludes: Set<string>
   /** Set for keywords that hold a multi-line block (see language.md, "Block keywords"). */
   block: BlockKind | null
+  /** Must be the first token of its line (`line_start`). */
+  lineStart: boolean
 }
 
 export interface Schema {
@@ -83,7 +85,8 @@ function parseKeyword(name: string, raw: unknown): KeywordSpec {
       ])
     ),
     excludes: new Set(excludes.map(String)),
-    block: (raw.block as BlockKind | undefined) ?? null
+    block: (raw.block as BlockKind | undefined) ?? null,
+    lineStart: raw.line_start === true
   }
 }
 

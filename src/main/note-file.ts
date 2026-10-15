@@ -1,18 +1,27 @@
-import { clausesOf, relationsOf, type Clause, type Document } from './dsl/document'
-import { clauseLine, isValidRelationTarget, relationLine, textLines } from './dsl/serialize'
+import { clausesOf, relationsOf, type Clause, type Document } from '../shared/dsl/document'
+import { ITEM_SCHEMA } from '../shared/dsl/item-schema'
+import { clauseLine, isValidRelationTarget, relationLine, textLines } from '../shared/dsl/serialize'
 import { NOTE_EXTENSION } from './graph-fs'
 import type { NoteLink } from '../shared/notes'
 
 /**
  * graphirst's view of an item file (see `../dsl/spec/language.md`): the body,
- * the extra content, `-> label @target` relationships and the `media` line.
- * Every other line of the file is left as it was.
+ * the extra content, `-> label @target` relationships and the `media` line it
+ * edits, plus what it only shows or filters by (other keyword lines, `data`,
+ * the type and the tags). Every other line of the file is left as it was.
  */
 
 /** Shown for, and written as, a relationship without a label. */
 export const UNLABELED_RELATION = 'related'
 
 const MEDIA_KEYWORD = 'media'
+const TAGS_KEYWORD = 'tags'
+
+/**
+ * Keywords whose lines a card doesn't show: `media` is the preview already,
+ * `tags` only matter for filtering.
+ */
+const BORING_KEYWORDS: ReadonlySet<string> = new Set([MEDIA_KEYWORD, TAGS_KEYWORD])
 
 export interface NoteContent {
   body: string
@@ -20,6 +29,13 @@ export interface NoteContent {
   extraContent: string
   /** Path of the attached image or video, relative to the graph folder. */
   media: string | null
+  /** The first `primary` keyword, or null for a plain note. */
+  type: string | null
+  tags: string[]
+  /** Keyword lines worth showing on a card, verbatim: no boring, relationship or state lines. */
+  sectionLines: string[]
+  /** The `data` block's lines joined, or null when there is none. */
+  dataText: string | null
 }
 
 export function noteFilename(stem: string): string {
@@ -32,6 +48,7 @@ export function noteStem(filename: string): string {
 }
 
 export function readNoteContent(doc: Document): NoteContent {
+  const clauses = clausesOf(doc)
   return {
     body: doc.body.join('\n'),
     rels: relationsOf(doc).map((relation) => ({
@@ -39,7 +56,18 @@ export function readNoteContent(doc: Document): NoteContent {
       target: noteFilename(relation.target)
     })),
     extraContent: doc.extra?.join('\n') ?? '',
-    media: clausesOf(doc).find((clause) => clause.keyword === MEDIA_KEYWORD)?.args[0] ?? null
+    media: clauses.find((clause) => clause.keyword === MEDIA_KEYWORD)?.args[0] ?? null,
+    type:
+      clauses.find((clause) => ITEM_SCHEMA.keywords.get(clause.keyword)?.role === 'primary')
+        ?.keyword ?? null,
+    tags: clauses.find((clause) => clause.keyword === TAGS_KEYWORD)?.args ?? [],
+    sectionLines: doc.section.flatMap((line) =>
+      line.kind === 'clauses' &&
+      !(line.unknownTail === null && line.clauses.every((c) => BORING_KEYWORDS.has(c.keyword)))
+        ? [line.raw]
+        : []
+    ),
+    dataText: doc.data?.join('\n') ?? null
   }
 }
 

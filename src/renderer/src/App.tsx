@@ -1,6 +1,7 @@
 import { useEffect, useReducer, useState } from 'react'
 import { AlertTriangle, FolderOpen, LoaderCircle, Moon, Settings2, Sun, Trash2 } from 'lucide-react'
 import GraphCanvas from './components/GraphCanvas'
+import BlacklistSettings from './components/settings/BlacklistSettings'
 import Sidebar from './components/sidebar/Sidebar'
 import { INITIAL_SEARCH_STATE, searchReducer } from './components/sidebar/search-state'
 import {
@@ -376,6 +377,10 @@ function App(): React.JSX.Element {
                 </button>
               )}
             </div>
+          ) : null}
+
+          {settingsOpen && bootstrap?.status === 'ready' ? (
+            <BlacklistSettings onError={(error) => setErrorMessage(error.message)} />
           ) : null}
 
           <div className="mt-5 flex items-center justify-between border-t border-base-300 pt-5">

@@ -8,6 +8,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent
 } from 'react'
 import MediaPreview from './MediaPreview'
+import RawNoteEditor from './editor/RawNoteEditor'
 import { compressImage } from '../lib/compress-image'
 import { mediaUrl } from '../lib/media'
 import { readFileAsDataUrl } from '../lib/read-file'
@@ -27,27 +28,31 @@ export type ImageState =
   | null
 
 export interface DraftNoteCardProps {
-  /** 'edit' reuses this same card to edit an existing note's body in place, in lieu of a separate dialog. */
+  /**
+   * 'edit' reuses this same card to edit an existing note in place, in lieu of a
+   * separate dialog - as the file's full text, in a highlighting editor.
+   */
   mode?: 'create' | 'edit'
-  /** Body to prefill the textarea with - only meaningful in 'edit' mode. */
-  initialBody?: string
+  /** The note file's full text - only meaningful in 'edit' mode. */
+  initialText?: string
   /** Filename of the note's existing attached image, if any - only meaningful in 'edit' mode. */
   initialImage?: string | null
   /** Whether to show the relation-label/reverse fields - false for a freestanding note with no related note. */
   showRelation: boolean
+  /** `body` is the new note's body, or in 'edit' mode the file's full text. */
   onSave: (body: string, label: string, reverse: boolean, image: ImageState) => Promise<void>
   onCancel: () => void
 }
 
 export default function DraftNoteCard({
   mode = 'create',
-  initialBody = '',
+  initialText = '',
   initialImage = null,
   showRelation,
   onSave,
   onCancel
 }: DraftNoteCardProps): React.JSX.Element {
-  const [body, setBody] = useState(initialBody)
+  const [body, setBody] = useState(initialText)
   const [label, setLabel] = useState('')
   const [reverse, setReverse] = useState(false)
   const [image, setImage] = useState<ImageState>(
@@ -59,6 +64,10 @@ export default function DraftNoteCard({
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
+    // The edit-mode editor focuses itself.
+    if (mode === 'edit') {
+      return
+    }
     // Deferred a frame: this card can mount mid-drag (dropping a connection onto
     // empty canvas), and React Flow's own pointerup/connection-end handling is
     // still settling focus at that point - focusing synchronously on mount loses
@@ -67,7 +76,7 @@ export default function DraftNoteCard({
       textareaRef.current?.focus()
     })
     return () => cancelAnimationFrame(frame)
-  }, [])
+  }, [mode])
 
   const handleFieldEscape = (event: ReactKeyboardEvent<HTMLInputElement>): void => {
     event.stopPropagation()
@@ -196,22 +205,32 @@ export default function DraftNoteCard({
         </div>
       ) : null}
 
-      <textarea
-        ref={textareaRef}
-        className="note-textarea textarea nodrag nowheel min-h-36 w-full resize-none text-sm leading-6 focus:border-primary/60"
-        placeholder="Write the note… (paste an image or short video to attach it)"
-        value={body}
-        onChange={(event) => setBody(event.target.value)}
-        onPaste={(event) => void handlePaste(event)}
-        onKeyDown={(event) => {
-          event.stopPropagation()
-          if (event.key === 'Escape') {
-            onCancel()
-          } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-            void handleSave()
-          }
-        }}
-      />
+      {mode === 'edit' ? (
+        <RawNoteEditor
+          initialText={initialText}
+          onChange={setBody}
+          onSubmit={() => void handleSave()}
+          onCancel={onCancel}
+          onPasteFile={(file) => void attachFile(file)}
+        />
+      ) : (
+        <textarea
+          ref={textareaRef}
+          className="note-textarea textarea nodrag nowheel min-h-36 w-full resize-none text-sm leading-6 focus:border-primary/60"
+          placeholder="Write the note… (paste an image or short video to attach it)"
+          value={body}
+          onChange={(event) => setBody(event.target.value)}
+          onPaste={(event) => void handlePaste(event)}
+          onKeyDown={(event) => {
+            event.stopPropagation()
+            if (event.key === 'Escape') {
+              onCancel()
+            } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+              void handleSave()
+            }
+          }}
+        />
+      )}
 
       {showRelation ? (
         <>

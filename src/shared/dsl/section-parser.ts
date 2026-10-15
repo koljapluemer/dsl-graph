@@ -124,7 +124,7 @@ export class SectionParser {
         this.diagnostics.push({ code: 'unknown_keyword', line: lineNo, detail: token.text })
         return { ...line, unknownTail: raw.slice(token.start) }
       }
-      if (spec.role === 'state' || spec.block) {
+      if (spec.role === 'state' || spec.block || (i > 0 && spec.lineStart)) {
         this.error('unexpected_token', lineNo, token.text)
         return line
       }
@@ -166,6 +166,20 @@ export class SectionParser {
           return null
         }
         args.push(source.slice(tokens[i].start).trim())
+        i = tokens.length
+        continue
+      }
+      if (arg.types.length === 1 && arg.types[0] === 'tags') {
+        if (i >= tokens.length) {
+          this.error('missing_arg', lineNo, spec.name)
+          return null
+        }
+        const bad = tokens.slice(i).find((token) => !matchesValueType(token, arg.types))
+        if (bad) {
+          this.error('invalid_value', lineNo, bad.text)
+          return null
+        }
+        args.push(...tokens.slice(i).map((token) => token.text))
         i = tokens.length
         continue
       }

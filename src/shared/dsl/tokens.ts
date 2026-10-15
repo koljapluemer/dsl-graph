@@ -3,6 +3,8 @@ export interface Token {
   text: string
   /** Offset in the line, for keeping the rest of an unknown keyword's line raw. */
   start: number
+  /** Offset just past the token in the line, closing quote included. */
+  end: number
   quoted: boolean
 }
 
@@ -33,13 +35,13 @@ export function tokenize(line: string): Token[] {
           i++
         }
       }
-      i++ // the closing quote
-      tokens.push({ text, start, quoted: true })
+      i = Math.min(i + 1, line.length) // the closing quote
+      tokens.push({ text, start, end: i, quoted: true })
     } else {
       while (i < line.length && !/\s/.test(line[i])) {
         i++
       }
-      tokens.push({ text: line.slice(start, i), start, quoted: false })
+      tokens.push({ text: line.slice(start, i), start, end: i, quoted: false })
     }
   }
   return tokens

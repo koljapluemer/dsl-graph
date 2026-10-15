@@ -15,6 +15,10 @@ export interface IndexedNote {
   extraContent: string
   /** Whitespace-compacted extra content, the extra-content counterpart to bodyCompact (search now scans this too). */
   extraCompact: string
+  /** Keyword lines a card shows, verbatim (see note-file's readNoteContent). */
+  sectionLines: string[]
+  /** The `data` block's text, or null when the note has none. */
+  dataText: string | null
   /** The note file's last modification, which orders the recent-notes list. */
   mtimeMs: number
 }
@@ -29,6 +33,8 @@ export interface GraphNodePayload {
   body: string
   image: string | null
   extraContent: string
+  sectionLines: string[]
+  dataText: string | null
   /** Hops from the nearest pin that discovered this node. Informational only. */
   depth: number
   degree: number
@@ -163,9 +169,24 @@ export interface DeleteNoteRequest {
 
 export interface UpdateNoteRequest {
   filename: string
-  body: string
-  /** Full desired extra content - blank removes the extra block. Always sent (unlike a PATCH-style partial). */
-  extraContent: string
+  /** The note file's full new text; rejected when it doesn't parse without errors. */
+  text: string
+}
+
+/**
+ * Notes this app ignores entirely: those whose type (primary keyword) is in
+ * `types`, or that carry any tag in `tags`.
+ */
+export interface Blacklist {
+  types: string[]
+  tags: string[]
+}
+
+export interface BlacklistOptions {
+  blacklist: Blacklist
+  /** Every type and tag in the folder, hidden notes included, sorted. */
+  knownTypes: string[]
+  knownTags: string[]
 }
 
 export interface AttachImageRequest {
@@ -262,7 +283,12 @@ export interface NotesApi {
   pickDirectory: () => Promise<NotesBootstrap>
   createNote: (request: CreateNoteRequest) => Promise<CreateNoteResponse>
   deleteNote: (request: DeleteNoteRequest) => Promise<void>
+  /** The note file's text as it is on disk, for editing. */
+  getNoteText: (filename: string) => Promise<string>
   updateNote: (request: UpdateNoteRequest) => Promise<void>
+  getBlacklistOptions: () => Promise<BlacklistOptions>
+  /** Saves the blacklist and rebuilds the index with it. */
+  setBlacklist: (blacklist: Blacklist) => Promise<void>
   attachImage: (request: AttachImageRequest) => Promise<AttachImageResponse>
   clearImage: (request: ClearImageRequest) => Promise<void>
   findOrphanedMedia: () => Promise<OrphanedMediaResponse>

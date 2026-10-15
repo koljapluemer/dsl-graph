@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { errorsOf, parseDocument, type Document } from './dsl/document'
-import { ITEM_SCHEMA } from './dsl/item-schema'
-import { serializeDocument } from './dsl/serialize'
+import { errorsOf, parseDocument, type Document } from '../shared/dsl/document'
+import { ITEM_SCHEMA } from '../shared/dsl/item-schema'
+import { serializeDocument } from '../shared/dsl/serialize'
 import {
   addRelation,
   newNoteDocument,
@@ -45,8 +45,35 @@ describe('note files', () => {
         { label: 'related', target: 'loose-0a0a0a.txt' }
       ],
       extraContent: 'Details',
-      media: 'images/buy-milk-a1b2c3-1.webp'
+      media: 'images/buy-milk-a1b2c3-1.webp',
+      type: null,
+      tags: [],
+      sectionLines: [],
+      dataText: null
     })
+  })
+
+  it('reads type, tags, and the keyword lines and data a card shows', () => {
+    const content = readNoteContent(
+      parse(
+        [
+          'Dentist',
+          'appointment 26-10-12',
+          'tags health do-this',
+          'media a.png',
+          'tasks call ahead',
+          'prio 3',
+          '(lastgenerated 26-10-11)',
+          '-> for @x-123456',
+          'data',
+          'room: D139'
+        ].join('\n')
+      )
+    )
+    expect(content.type).toBe('appointment')
+    expect(content.tags).toEqual(['health', 'do-this'])
+    expect(content.sectionLines).toEqual(['appointment 26-10-12', 'tasks call ahead', 'prio 3'])
+    expect(content.dataText).toBe('room: D139')
   })
 
   it('keeps lines it does not own when editing', () => {
@@ -90,7 +117,7 @@ describe('note files', () => {
 
   it('sets and removes extra content', () => {
     const withExtra = edit('x\n-> a @b-123456', (doc) => setExtra(doc, '\nlong\n-> text @c-1\n\n'))
-    expect(withExtra).toBe('x\n\n-> a @b-123456\nextra\nlong\n-> text @c-1\n')
+    expect(withExtra).toBe('x\n\n-> a @b-123456\nextra\nlong\n -> text @c-1\n')
     expect(edit(withExtra, (doc) => setExtra(doc, ' '))).toBe('x\n\n-> a @b-123456\n')
   })
 

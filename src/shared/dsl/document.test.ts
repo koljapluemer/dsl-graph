@@ -42,7 +42,10 @@ function resultJson(doc: Document): Record<string, unknown> {
     state: stateOf(doc).map(clauseJson),
     unknown: unknownOf(doc),
     extra: doc.extra === null ? null : doc.extra.join('\n'),
-    data: doc.data === null ? null : parse(doc.data.join('\n')),
+    data:
+      doc.data === null || doc.diagnostics.some((diagnostic) => diagnostic.code === 'invalid_yaml')
+        ? null
+        : parse(doc.data.join('\n')),
     errors: diagnosticsJson(doc.diagnostics.filter((diagnostic) => !isWarning(diagnostic))),
     warnings: diagnosticsJson(doc.diagnostics.filter(isWarning))
   }

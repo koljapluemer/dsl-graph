@@ -18,12 +18,10 @@ export interface ViewCallbacks {
   onStartEdit: (filename: string) => void
   onSaveEdit: (
     filename: string,
-    body: string,
+    text: string,
     image: ImageState,
-    previousImage: string | null,
-    extraContent: string
+    previousImage: string | null
   ) => Promise<void>
-  onUpdateExtra: (filename: string, patch: { body: string; extraContent: string }) => Promise<void>
   onSaveDraft: (
     draft: DraftInteraction,
     body: string,
@@ -90,10 +88,10 @@ export function buildView(
         zIndex: EDITING_NODE_Z_INDEX,
         data: {
           kind: 'edit',
-          initialBody: note.body,
+          initialText: interaction.text,
           initialImage: note.image,
-          onSave: (body: string, image: ImageState) =>
-            callbacks.onSaveEdit(note.filename, body, image, note.image, note.extraContent),
+          onSave: (text: string, image: ImageState) =>
+            callbacks.onSaveEdit(note.filename, text, image, note.image),
           onCancel: callbacks.onCancelInteraction
         }
       }
@@ -110,7 +108,6 @@ export function buildView(
         isAnchor: note.filename === anchorFilename,
         onDelete: callbacks.onDeleteNote,
         onEdit: callbacks.onStartEdit,
-        onUpdateExtra: callbacks.onUpdateExtra,
         onPin: callbacks.onPinNote,
         onUnpin: callbacks.onUnpinNote,
         onChangeDepth: callbacks.onChangeDepth

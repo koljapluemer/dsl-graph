@@ -17,6 +17,7 @@ import icon from '../../resources/icon.png?asset'
 import { NOTES_CHANGED_EVENT, NOTES_INDEX_PROGRESS_EVENT, NoteStore } from './note-store'
 import type {
   AttachImageRequest,
+  Blacklist,
   ClearImageRequest,
   ConnectNotesRequest,
   CopyMediaRequest,
@@ -218,8 +219,20 @@ app.whenReady().then(() => {
     return noteStore.deleteNote(request)
   })
 
+  ipcMain.handle('notes:get-text', async (_event, filename: string) => {
+    return noteStore.getNoteText(filename)
+  })
+
   ipcMain.handle('notes:update', async (_event, request: UpdateNoteRequest) => {
     return noteStore.updateNote(request)
+  })
+
+  ipcMain.handle('notes:get-blacklist-options', async () => {
+    return noteStore.getBlacklistOptions()
+  })
+
+  ipcMain.handle('notes:set-blacklist', async (_event, blacklist: Blacklist) => {
+    return noteStore.setBlacklist(blacklist)
   })
 
   ipcMain.handle('notes:attach-image', async (_event, request: AttachImageRequest) => {
